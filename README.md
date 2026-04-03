@@ -168,8 +168,8 @@
 
 ### 10. 生成效果
 
-<img width="1920" height="1920" alt="feibi" src="https://github.com/user-attachments/assets/62105ce9-dc9a-4317-ac9d-9deb18fba4e2" />
-
+<img width="1920" height="1920" alt="image" src="https://github.com/user-attachments/assets/cd1613f1-13f4-4ce2-9f36-07ef56f4a5a7" />
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/411754a1-5fd1-4307-be85-a32e6e1d538a" />
 
 ## 常见问题
 
