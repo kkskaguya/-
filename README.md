@@ -60,17 +60,14 @@
 2. 检查模型的材质槽是否完整。
 3. 确认基础贴图文件已经整理到可访问位置。
 
-【图片】  
-需要截图：导入模型后的 3D 视图，以及对象材质槽面板。
-
 ### 2. 打开插件面板
 
 1. 切换到 `3D 视图`。
 2. 按 `N` 打开右侧 Sidebar。
 3. 进入 `终末地卡渲` 选项卡。
 
-【图片】  
-需要截图：3D 视图右侧 Sidebar 中的 `Endfield Toon` 面板位置。
+<img width="334" height="202" alt="屏幕截图 2026-04-03 213632" src="https://github.com/user-attachments/assets/82d6a1d3-0c81-41aa-a403-6937cf662878" />
+
 
 ### 3. 选择着色器类型
 
@@ -84,8 +81,7 @@
 
 建议按对象类型分批处理，而不是一次对所有不同用途的材质混合处理。
 
-【图片】  
-需要截图：`着色器类型` 下拉框展开后的全部选项。
+<img width="220" height="100" alt="屏幕截图 2026-04-03 213740" src="https://github.com/user-attachments/assets/09501ff9-be26-4169-9e3d-48cdb761b6a0" />
 
 ### 4. 确认预设库
 
@@ -95,8 +91,7 @@
 
 如果你有自定义预设库，也可以在面板里手动指定 `preset_library_path`。
 
-【图片】  
-需要截图：插件面板顶部的预设库路径区域，以及成功识别预设库后的状态提示。
+<img width="303" height="39" alt="image" src="https://github.com/user-attachments/assets/b8ecf286-4969-4d71-83b2-27bb6827f059" />
 
 ### 5. 选择贴图
 
@@ -117,8 +112,7 @@
 
 如果贴图命名较规范，可以开启自动补全，让插件推断缺失路径。
 
-【图片】  
-需要截图：贴图路径填写区域，至少展示 `_D`、`_N`、`_P` 三个输入框。
+<img width="304" height="193" alt="image" src="https://github.com/user-attachments/assets/70d105f2-b424-4e2b-a73b-f2f1e55e1c62" />
 
 ### 6. 设置转换参数
 
@@ -134,8 +128,7 @@
 
 通常建议首次转换时保持默认设置，只在结果明确异常时再逐项排查。
 
-【图片】  
-需要截图：转换参数区域和 `一键生成` 按钮。
+<img width="305" height="162" alt="image" src="https://github.com/user-attachments/assets/8b896118-c13b-4fef-87e1-65b9f87d4570" />
 
 ### 7. 执行一键生成
 
@@ -145,9 +138,6 @@
 4. 检查生成后的材质、描边和几何节点结果。
 
 如果是多种材质混合模型，建议分离模型后按 `身体`、`衣服`、`脸`、`头发` 分开执行。
-
-【图片】  
-需要截图：点击生成前后的材质结果对比，最好包含节点树或材质槽变化。
 
 ### 8. FACE 模式的额外设置
 
@@ -160,8 +150,7 @@
 
 如果头骨自动识别失败，应手动指定对应骨架与头骨名称。
 
-【图片】  
-需要截图：`FACE` 模式下的头骨设置区域，以及 Iris / Brow 材质槽设置区域。
+<img width="300" height="372" alt="image" src="https://github.com/user-attachments/assets/ca128e9f-f9d7-4a0f-93e5-c235a096f6e8" />
 
 ### 9. 描边与微调
 
@@ -170,12 +159,17 @@
 - 描边厚度
 - 描边材质偏移
 - 描边修改器名称
-- Weld / Proxy / Geometry Nodes Merge
+- 
+<img width="303" height="98" alt="image" src="https://github.com/user-attachments/assets/a431c8f4-8802-4b13-a19c-f2a5f857d2c7" />
 
-面部材质还可以在面板底部继续做 SDF / 高光 / 映射微调。
+面部材质还可以在面板底部继续做 SDF / 高光 映射微调。
 
-【图片】  
-需要截图：描边系统区域，以及底部微调参数区域。
+<img width="307" height="221" alt="image" src="https://github.com/user-attachments/assets/e6a86d2d-93eb-4459-aaf8-0a665ff202ea" />
+
+### 10. 生成效果
+
+<img width="1920" height="1920" alt="feibi" src="https://github.com/user-attachments/assets/62105ce9-dc9a-4317-ac9d-9deb18fba4e2" />
+
 
 ## 常见问题
 
@@ -227,3 +221,4 @@
 
 - 感谢新杨XIYAG大佬制作的仿《明日方舟：终末地》渲染节点
 - 感谢茶叶味香皂大佬配布的《明日方舟：终末地》陈千语
+- 感谢GPT5.4在代码方面的帮助
