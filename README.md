@@ -112,7 +112,9 @@
 
 如果贴图命名较规范，可以开启自动补全，让插件推断缺失路径。
 
-<img width="304" height="193" alt="image" src="https://github.com/user-attachments/assets/70d105f2-b424-4e2b-a73b-f2f1e55e1c62" />
+<img width="366" height="166" alt="image" src="https://github.com/user-attachments/assets/016efa25-b3a3-440c-ad92-3e4054d0afa5" />
+
+缺失的贴图可以用Materialize生成
 
 ### 6. 设置转换参数
 
@@ -159,7 +161,7 @@
 - 描边厚度
 - 描边材质偏移
 - 描边修改器名称
-- 
+
 <img width="303" height="98" alt="image" src="https://github.com/user-attachments/assets/a431c8f4-8802-4b13-a19c-f2a5f857d2c7" />
 
 面部材质还可以在面板底部继续做 SDF / 高光 映射微调。
