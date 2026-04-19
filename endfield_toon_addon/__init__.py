@@ -1,19 +1,31 @@
+ADDON_AUTHOR = "kkskaguya"
+DEFAULT_FACE_IRIS_SLOT_COUNT = 1
+DEFAULT_FACE_BROW_SLOT_COUNT = 1
+ACKNOWLEDGEMENT_LINES = (
+    "感谢新杨XIYAG大佬制作的仿《明日方舟：终末地》渲染节点",
+    "感谢茶叶味香皂大佬配布的《明日方舟：终末地》陈千语",
+)
+
 bl_info = {
     "name": "Endfield Toon Addon",
     "author": "kkskaguya",
-    "version": (4, 0, 2),
+    "version": (4, 5, 0),
     "blender": (4, 0, 0),
     "location": "View3D > Sidebar > Endfield Toon",
     "description": "One-click convert imported materials to Arknights: Endfield toon shading.",
     "category": "Material",
 }
 
+import json
 import os
 import re
 from dataclasses import dataclass
 
 import bpy
+import gpu
 from bpy.app.handlers import persistent
+from gpu_extras.batch import batch_for_shader
+from gpu_extras.presets import draw_texture_2d
 from mathutils import Matrix, Vector
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, PointerProperty, StringProperty
 from bpy.types import Operator, Panel, PropertyGroup
@@ -33,7 +45,12 @@ SHADER_TYPE_ITEMS = [
 SHADER_GROUP_KEYWORDS = {
     "BODY": ("Arknights: Endfield_PBRToonBase", "Arknights: Endfield_PBRToonBase2.0"),
     "CLOTH": ("Arknights: Endfield_PBRToonBase", "Arknights: Endfield_PBRToonBase2.0"),
-    "FACE": ("Arknights: Endfield_PBRToonFaceBase", "Arknights: Endfield_PBRToonFaceBase2.0"),
+    "FACE": (
+        "Arknights: Endfield_PBRToonFaceBase",
+        "Arknights: Endfield_PBRToonFaceBase2.0",
+        "Arknights: Endfield_PBRToonBaseFace",
+        "Arknights: Endfield_PBRToonBaseFace2.0",
+    ),
     "HAIR": ("Arknights: Endfield_PBRToonBaseHair",),
     "PUPIL": ("Arknights: Endfield_PBRToon_irisBase", "Arknights: Endfield_PBRToon_irisBase2.0"),
     "BROW": ("Arknights: Endfield_PBRToonBaseBrow",),
@@ -166,6 +183,29 @@ HEAD_FORWARD_OFFSET = Vector((0.0, -0.27221608, 0.0))
 HEAD_RIGHT_OFFSET = Vector((-0.27067417, 0.0, 0.0))
 HEAD_HELPER_SCALE = (0.28153285, 0.28153285, 0.28153285)
 HEAD_DIRECTION_SCALE = (0.19306129, 0.19306129, 0.19306129)
+PRESET_RENDER_ENGINE = "BLENDER_EEVEE"
+PRESET_RENDER_DEFAULTS = {
+    "filter_size": 1.5,
+    "film_transparent": False,
+    "use_simplify": False,
+}
+PRESET_VIEW_DEFAULTS = {
+    "view_transform": "AgX",
+    "look": "AgX - Medium High Contrast",
+    "exposure": 0.0,
+    "gamma": 1.0,
+}
+PRESET_EEVEE_DEFAULTS = {
+    "use_shadows": True,
+    "shadow_cube_size": "4096",
+    "shadow_cascade_size": "4096",
+    "shadow_step_count": 6,
+    "use_raytracing": True,
+    "light_threshold": 0.01,
+    "gi_cubemap_resolution": "512",
+    "taa_render_samples": 128,
+    "taa_samples": 64,
+}
 TEST_WELD_MODIFIER_NAME = "Endfield_TestWeld"
 BODY_WELD_MODIFIER_NAME = "鐒婃帴"
 BODY_WELD_DISTANCE = 0.0001
@@ -173,6 +213,60 @@ TEST_GN_MERGE_MODIFIER_NAME = "Endfield_TestGNMerge"
 TEST_GN_MERGE_GROUP_NAME = "Endfield_TestMergeByDistance"
 TEST_PROXY_SUFFIX = "_OutlineProxy"
 TEST_PROXY_MATERIAL_NAME = "ENDFIELD_ProxyOutline"
+EEVEE_SHADER_INFO_COMPAT_GROUP_NAME = "ENDFIELD_EEVEE5_ShaderInfoCompat"
+EEVEE_SHADER_INFO_COMPAT_GROUP_VERSION = 2
+EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_NAME = "ENDFIELD_EEVEE5_ShaderInfoLitCompat"
+EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_VERSION = 1
+EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_NAME = "ENDFIELD_EEVEE5_ScreenspaceInfoCompat"
+EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_VERSION = 1
+FACE_TEX_CONTROL_COLLECTION_NAME = "ENDFIELD_TEX_CONTROLS"
+FACE_TEX_CONTROL_ROOT_KEY = "_endfield_face_tex_ctrl_root"
+FACE_TEX_CONTROL_SDF_KEY = "_endfield_face_tex_ctrl_sdf"
+FACE_TEX_CONTROL_CM_KEY = "_endfield_face_tex_ctrl_cm"
+FACE_UV_CALIBRATION_STATE = {
+    "running": False,
+    "material_name": "",
+    "object_name": "",
+    "base_image_name": "",
+    "sdf_image_name": "",
+    "cm_image_name": "",
+    "sdf_preview_image_name": "",
+    "cm_preview_image_name": "",
+    "draw_handle": None,
+    "dragging": False,
+    "drag_target": "",
+    "drag_mode": "",
+    "drag_start_uv": (0.0, 0.0),
+    "drag_rect": (0.0, 0.0, 1.0, 1.0),
+    "editor_images": [],
+}
+FACE_UV_SHADER = None
+FACE_UV_TEXTURE_CACHE = {}
+
+
+def _requires_eevee_compat() -> bool:
+    return tuple(getattr(bpy.app, "version", (0, 0, 0))) >= (5, 0, 0)
+
+
+TEXTURE_STATE_STORAGE_PROPS = {
+    "BODY": "texture_state_body",
+    "CLOTH": "texture_state_cloth",
+    "FACE": "texture_state_face",
+    "HAIR": "texture_state_hair",
+    "PUPIL": "texture_state_pupil",
+    "BROW": "texture_state_brow",
+}
+
+TEXTURE_STATE_ALL_PROP_IDS = (
+    "tex_d",
+    "tex_n",
+    "tex_p",
+    "tex_m",
+    "tex_st",
+    "tex_e",
+    "face_sdf_tex",
+    "face_cm_tex",
+)
 
 HEAD_BONE_KEYWORDS = ("head", "头", "首")
 
@@ -277,6 +371,34 @@ ROLE_SEARCH_TAGS = {
     "tex_e": ["_e", "emi", "emission"],
 }
 
+GENERIC_TEXTURE_SCAN_RULES = {
+    "tex_n": {
+        "must_any": ("_n", "_hn", "normal"),
+        "prefer": ("_n", "_hn"),
+        "avoid": ("_d", "_p", "_st", "_e", "cm_m", "hl_m", "eyeshadow", "hairshadow", "lut"),
+    },
+    "tex_p": {
+        "must_any": ("_p", "_id", "_ilm", "lightmap"),
+        "prefer": ("_p", "_id", "_ilm", "lightmap"),
+        "avoid": ("_d", "_n", "_hn", "_st", "_e", "hl_m", "eyeshadow", "hairshadow", "lut"),
+    },
+    "tex_st": {
+        "must_any": ("_st", "outline", "mask"),
+        "prefer": ("_st", "outline", "mask"),
+        "avoid": ("_d", "_n", "_hn", "_p", "_e", "hl_m", "cm_m", "eyeshadow", "hairshadow"),
+    },
+    "face_sdf_tex": {
+        "must_any": ("sdf",),
+        "prefer": ("female_face", "face", "common"),
+        "avoid": ("_st", "_d", "hl_m", "cm_m", "eyeshadow", "hairshadow", "lut"),
+    },
+    "face_cm_tex": {
+        "must_any": ("cm_m",),
+        "prefer": ("female_face", "face", "common"),
+        "avoid": ("hl_m", "eyeshadow", "hairshadow", "lut", "_st"),
+    },
+}
+
 ROLE_COLORSPACE_DEFAULTS = {
     "tex_d": "sRGB",
     "tex_n": "Non-Color",
@@ -289,12 +411,12 @@ ROLE_COLORSPACE_DEFAULTS = {
 ROLE_SOCKET_KEYWORDS = {
     "tex_d_color": ["_d(srgb)r.g.b"],
     "tex_d_alpha": ["_d(srgb).a"],
-    "tex_n_color": ["_n(non_color)", "_hn(non_color)r.g.b", "_hn"],
-    "tex_n_alpha": ["_hn(non_color)a", "_hn.a"],
-    "tex_p_color": ["_p(non_color)r.g.b", "_p"],
-    "tex_p_alpha": ["_p(non_color)a", "_p.a"],
-    "tex_m_color": ["_m", "metal", "smooth", "rough"],
-    "tex_e_color": ["_e", "emission", "emi"],
+    "tex_n_color": ["_n(non_color)", "_n(非色彩", "_hn(non_color)r.g.b", "_hn(非色彩", "_hn"],
+    "tex_n_alpha": ["_hn(non_color)a", "_hn(非色彩", "_hn.a"],
+    "tex_p_color": ["_p(non_color)r.g.b", "_p(非色彩", "_p"],
+    "tex_p_alpha": ["_p(non_color)a", "_p(非色彩", "_p.a"],
+    "tex_m_color": ["_m", "_m（非色彩", "_m(非色彩", "metal", "smooth", "rough"],
+    "tex_e_color": ["_e", "_e（非色彩", "_e(非色彩", "emission", "emi"],
 }
 
 EYE_TRANSPARENCY_MODIFIER_PREFIX = "Eye Transparency"
@@ -339,7 +461,11 @@ SAFE_TWEAKS = {
 }
 
 
-def _ensure_face_eye_material_slot_count(settings, iris_min: int = 1, brow_min: int = 1):
+def _ensure_face_eye_material_slot_count(
+    settings,
+    iris_min: int = DEFAULT_FACE_IRIS_SLOT_COUNT,
+    brow_min: int = DEFAULT_FACE_BROW_SLOT_COUNT,
+):
     while len(settings.face_iris_materials) < iris_min:
         settings.face_iris_materials.add()
     while len(settings.face_brow_materials) < brow_min:
@@ -348,11 +474,154 @@ def _ensure_face_eye_material_slot_count(settings, iris_min: int = 1, brow_min: 
 
 def _on_face_integrated_eye_update(self, context):
     if self.face_integrated_eye_transparency:
-        _ensure_face_eye_material_slot_count(self, 1, 1)
+        _ensure_face_eye_material_slot_count(
+            self,
+            DEFAULT_FACE_IRIS_SLOT_COUNT,
+            DEFAULT_FACE_BROW_SLOT_COUNT,
+        )
 
 
 def _poll_armature_object(self, obj):
     return bool(obj and obj.type == "ARMATURE")
+
+
+def _tag_all_areas_for_redraw(area_type: str = ""):
+    window_manager = getattr(bpy.context, "window_manager", None)
+    if window_manager is None:
+        return
+    for window in window_manager.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area_type and area.type != area_type:
+                continue
+            area.tag_redraw()
+
+
+def _on_face_uv_overlay_update(self, context):
+    _tag_all_areas_for_redraw()
+
+
+def _texture_state_prop_id(shader_type: str) -> str:
+    return TEXTURE_STATE_STORAGE_PROPS.get(shader_type, "")
+
+
+def _texture_state_field_ids(shader_type: str):
+    field_ids = [slot.prop_id for slot in TEXTURE_SLOT_LAYOUT.get(shader_type, ())]
+    if shader_type == "FACE":
+        field_ids.extend(("face_sdf_tex", "face_cm_tex"))
+    return tuple(dict.fromkeys(field_ids))
+
+
+def _decode_texture_state(raw_state: str):
+    if not raw_state:
+        return {}
+    try:
+        data = json.loads(raw_state)
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    decoded = {}
+    for prop_id in TEXTURE_STATE_ALL_PROP_IDS:
+        value = data.get(prop_id, "")
+        if isinstance(value, str):
+            decoded[prop_id] = value
+    return decoded
+
+
+def _texture_state_is_loading(settings) -> bool:
+    return bool(getattr(settings, "texture_state_loading", False))
+
+
+def _capture_texture_state(settings, shader_type: str = ""):
+    shader_type = shader_type or getattr(settings, "shader_type", "BODY") or "BODY"
+    return {prop_id: getattr(settings, prop_id, "") or "" for prop_id in _texture_state_field_ids(shader_type)}
+
+
+def _save_texture_state(settings, shader_type: str = ""):
+    if settings is None or _texture_state_is_loading(settings):
+        return
+    shader_type = shader_type or getattr(settings, "shader_type", "BODY") or "BODY"
+    prop_id = _texture_state_prop_id(shader_type)
+    if not prop_id:
+        return
+    setattr(settings, prop_id, json.dumps(_capture_texture_state(settings, shader_type), ensure_ascii=False))
+
+
+def _apply_texture_state(settings, shader_type: str, state: dict):
+    if settings is None:
+        return
+    settings.texture_state_loading = True
+    try:
+        for prop_id in TEXTURE_STATE_ALL_PROP_IDS:
+            setattr(settings, prop_id, "")
+        for prop_id in _texture_state_field_ids(shader_type):
+            setattr(settings, prop_id, state.get(prop_id, "") or "")
+    finally:
+        settings.texture_state_loading = False
+    _tag_all_areas_for_redraw()
+
+
+def _restore_texture_state(settings, shader_type: str):
+    if settings is None:
+        return
+    prop_id = _texture_state_prop_id(shader_type)
+    state = _decode_texture_state(getattr(settings, prop_id, ""))
+    _apply_texture_state(settings, shader_type, state)
+
+
+def _bootstrap_texture_state(settings):
+    if settings is None or getattr(settings, "texture_state_ready", False):
+        return
+    current_shader = getattr(settings, "shader_type", "BODY") or "BODY"
+    prop_id = _texture_state_prop_id(current_shader)
+    existing_state = _decode_texture_state(getattr(settings, prop_id, ""))
+    if existing_state:
+        _apply_texture_state(settings, current_shader, existing_state)
+    else:
+        _save_texture_state(settings, current_shader)
+    settings.last_shader_type = current_shader
+    settings.texture_state_ready = True
+
+
+def _bootstrap_texture_states():
+    for scene in bpy.data.scenes:
+        settings = getattr(scene, "endfield_toon_settings", None)
+        if settings is not None:
+            _bootstrap_texture_state(settings)
+
+
+def _on_texture_path_update(self, context):
+    if _texture_state_is_loading(self):
+        return
+    if not getattr(self, "texture_state_ready", False):
+        if context is None:
+            return
+        _bootstrap_texture_state(self)
+    _save_texture_state(self)
+    _tag_all_areas_for_redraw()
+
+
+def _on_shader_type_update(self, context):
+    if _texture_state_is_loading(self):
+        return
+    new_shader = getattr(self, "shader_type", "BODY") or "BODY"
+    if not getattr(self, "texture_state_ready", False):
+        if context is None:
+            self.last_shader_type = new_shader
+            return
+        _bootstrap_texture_state(self)
+
+    previous_shader = getattr(self, "last_shader_type", "") or new_shader
+    if previous_shader != new_shader:
+        _save_texture_state(self, previous_shader)
+        _restore_texture_state(self, new_shader)
+        self.last_shader_type = new_shader
+    else:
+        _save_texture_state(self, new_shader)
 
 
 class ENDFIELD_PG_FaceEyeMaterialSlot(PropertyGroup):
@@ -365,7 +634,7 @@ class ENDFIELD_PG_Settings(PropertyGroup):
         subtype="FILE_PATH",
         description="留空时默认使用插件内置的 Chen.blend",
     )
-    shader_type: EnumProperty(name="着色器类型选择", items=SHADER_TYPE_ITEMS, default="BODY")
+    shader_type: EnumProperty(name="着色器类型选择", items=SHADER_TYPE_ITEMS, default="BODY", update=_on_shader_type_update)
     apply_mode: EnumProperty(
         name="替换范围",
         items=[
@@ -416,18 +685,52 @@ class ENDFIELD_PG_Settings(PropertyGroup):
     face_iris_materials: CollectionProperty(type=ENDFIELD_PG_FaceEyeMaterialSlot)
     face_brow_materials: CollectionProperty(type=ENDFIELD_PG_FaceEyeMaterialSlot)
 
-    tex_d: StringProperty(name="_D", subtype="FILE_PATH")
-    tex_n: StringProperty(name="_N", subtype="FILE_PATH")
-    tex_p: StringProperty(name="_P", subtype="FILE_PATH")
-    tex_m: StringProperty(name="_M", subtype="FILE_PATH")
-    tex_st: StringProperty(name="_ST", subtype="FILE_PATH")
-    tex_e: StringProperty(name="_E", subtype="FILE_PATH")
+    last_shader_type: StringProperty(default="BODY", options={"HIDDEN"})
+    texture_state_ready: BoolProperty(default=False, options={"HIDDEN"})
+    texture_state_loading: BoolProperty(default=False, options={"HIDDEN"})
+    texture_state_body: StringProperty(default="", options={"HIDDEN"})
+    texture_state_cloth: StringProperty(default="", options={"HIDDEN"})
+    texture_state_face: StringProperty(default="", options={"HIDDEN"})
+    texture_state_hair: StringProperty(default="", options={"HIDDEN"})
+    texture_state_pupil: StringProperty(default="", options={"HIDDEN"})
+    texture_state_brow: StringProperty(default="", options={"HIDDEN"})
+
+    tex_d: StringProperty(name="_D", subtype="FILE_PATH", update=_on_texture_path_update)
+    tex_n: StringProperty(name="_N", subtype="FILE_PATH", update=_on_texture_path_update)
+    tex_p: StringProperty(name="_P", subtype="FILE_PATH", update=_on_texture_path_update)
+    tex_m: StringProperty(name="_M", subtype="FILE_PATH", update=_on_texture_path_update)
+    tex_st: StringProperty(name="_ST", subtype="FILE_PATH", update=_on_texture_path_update)
+    tex_e: StringProperty(name="_E", subtype="FILE_PATH", update=_on_texture_path_update)
+    face_sdf_tex: StringProperty(name="Face SDF", subtype="FILE_PATH", update=_on_texture_path_update)
+    face_cm_tex: StringProperty(name="Face M", subtype="FILE_PATH", update=_on_texture_path_update)
+    face_uv_show_sdf: BoolProperty(name="显示 SDF", default=True, update=_on_face_uv_overlay_update)
+    face_uv_show_cm: BoolProperty(name="显示 M", default=True, update=_on_face_uv_overlay_update)
+    face_uv_active_target: EnumProperty(
+        name="当前调整目标",
+        items=[
+            ("SDF", "SDF", ""),
+            ("CM", "M/亮斑", ""),
+        ],
+        default="SDF",
+        update=_on_face_uv_overlay_update,
+    )
 
 
 def _safe_abs_path(path_value: str) -> str:
     if not path_value:
         return ""
     return bpy.path.abspath(path_value)
+
+
+def _same_file_path(path_a: str, path_b: str) -> bool:
+    abs_a = _safe_abs_path(path_a)
+    abs_b = _safe_abs_path(path_b)
+    if not abs_a or not abs_b:
+        return False
+    try:
+        return os.path.normcase(os.path.normpath(abs_a)) == os.path.normcase(os.path.normpath(abs_b))
+    except Exception:
+        return abs_a == abs_b
 
 
 def _addon_dir() -> str:
@@ -484,6 +787,49 @@ def _make_backup_name(data_collection, base_name: str, suffix: str) -> str:
         candidate = f"{base_name}{suffix}.{index:03d}"
         index += 1
     return candidate
+
+
+def _backup_matching_datablocks(data_collection, base_names, predicate=None) -> int:
+    renamed = 0
+    base_names = tuple(dict.fromkeys(name for name in base_names if name))
+    if not base_names:
+        return 0
+    for datablock in list(data_collection):
+        datablock_name = getattr(datablock, "name", "")
+        if not any(_name_matches_datablock(base_name, datablock_name) for base_name in base_names):
+            continue
+        if predicate is not None and not predicate(datablock):
+            continue
+        try:
+            datablock.name = _make_backup_name(data_collection, datablock_name, "__OLD")
+        except Exception:
+            continue
+        renamed += 1
+    return renamed
+
+
+def _collect_node_group_names(node_tree, names=None, visited=None):
+    if node_tree is None:
+        return set() if names is None else names
+    names = set() if names is None else names
+    visited = set() if visited is None else visited
+    tree_key = node_tree.as_pointer()
+    if tree_key in visited:
+        return names
+    visited.add(tree_key)
+    names.add(node_tree.name)
+    for node in node_tree.nodes:
+        child_tree = getattr(node, "node_tree", None)
+        if child_tree is None:
+            continue
+        _collect_node_group_names(child_tree, names, visited)
+    return names
+
+
+def _collect_material_node_group_names(material) -> set:
+    if material is None or not material.use_nodes or material.node_tree is None:
+        return set()
+    return _collect_node_group_names(material.node_tree)
 
 
 def _append_datablock_from_library(library_path: str, collection_name: str, datablock_name: str):
@@ -672,13 +1018,16 @@ def _stash_outdated_node_group(group_name: str, library_path: str, tree_type: st
 def _find_or_append_node_group_by_name(library_path: str, group_name: str, tree_type: str = None):
     group = _find_stamped_node_group(group_name, library_path, tree_type=tree_type)
     if group:
+        _patch_node_tree_for_eevee_compat(group)
         return group
     _stash_outdated_node_group(group_name, library_path, tree_type=tree_type)
     group = _append_datablock_from_library(library_path, "node_groups", group_name)
     if group and (tree_type is None or group.bl_idname == tree_type):
+        _patch_node_tree_for_eevee_compat(group)
         return group
     group = bpy.data.node_groups.get(group_name)
     if group and (tree_type is None or group.bl_idname == tree_type):
+        _patch_node_tree_for_eevee_compat(group)
         return group
     return None
 
@@ -718,6 +1067,7 @@ def _ensure_material_uses_library_node_groups(material, library_path: str):
     if not material or not material.use_nodes or not material.node_tree:
         return material
     _ensure_node_tree_uses_library_groups(material.node_tree, library_path)
+    _patch_material_for_eevee_compat(material)
     return material
 
 
@@ -761,6 +1111,387 @@ def _find_or_append_first_material(library_path: str, candidates):
         if material:
             return material
     return None
+
+
+def _clear_node_group_interface(node_group):
+    interface = getattr(node_group, "interface", None)
+    items_tree = getattr(interface, "items_tree", None)
+    if interface is None or items_tree is None:
+        return
+    for item in list(items_tree):
+        try:
+            interface.remove(item)
+        except Exception:
+            pass
+
+
+def _ensure_eevee_shader_info_compat_group():
+    group = bpy.data.node_groups.get(EEVEE_SHADER_INFO_COMPAT_GROUP_NAME)
+    if group is not None and group.bl_idname != "ShaderNodeTree":
+        group.name = _make_backup_name(bpy.data.node_groups, EEVEE_SHADER_INFO_COMPAT_GROUP_NAME, "__OLD")
+        group = None
+    if group is None:
+        group = bpy.data.node_groups.new(EEVEE_SHADER_INFO_COMPAT_GROUP_NAME, "ShaderNodeTree")
+
+    if group.get("_endfield_eevee_shader_info_compat_version") == EEVEE_SHADER_INFO_COMPAT_GROUP_VERSION:
+        return group
+
+    nodes = group.nodes
+    links = group.links
+    nodes.clear()
+    _clear_node_group_interface(group)
+
+    interface = group.interface
+    interface.new_socket(name="WorldPosition", in_out="INPUT", socket_type="NodeSocketVector")
+    interface.new_socket(name="Normal", in_out="INPUT", socket_type="NodeSocketVector")
+    interface.new_socket(name="Diffuse Shading", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Cast Shadows", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Self Shadows", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Ambient Lighting", in_out="OUTPUT", socket_type="NodeSocketColor")
+    interface.new_socket(name="Half-lambert factor", in_out="OUTPUT", socket_type="NodeSocketFloat")
+
+    group_input = nodes.new("NodeGroupInput")
+    group_input.location = (-420.0, 0.0)
+
+    one_value = nodes.new("ShaderNodeValue")
+    one_value.location = (-180.0, 80.0)
+    one_value.outputs["Value"].default_value = 1.0
+
+    ambient_rgb = nodes.new("ShaderNodeRGB")
+    ambient_rgb.location = (-180.0, -80.0)
+    ambient_rgb.outputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+
+    group_output = nodes.new("NodeGroupOutput")
+    group_output.location = (120.0, 20.0)
+
+    links.new(one_value.outputs["Value"], group_output.inputs["Diffuse Shading"])
+    links.new(one_value.outputs["Value"], group_output.inputs["Cast Shadows"])
+    links.new(one_value.outputs["Value"], group_output.inputs["Self Shadows"])
+    links.new(ambient_rgb.outputs["Color"], group_output.inputs["Ambient Lighting"])
+    links.new(one_value.outputs["Value"], group_output.inputs["Half-lambert factor"])
+
+    group["_endfield_eevee_shader_info_compat_version"] = EEVEE_SHADER_INFO_COMPAT_GROUP_VERSION
+    return group
+
+
+def _ensure_eevee_shader_info_lit_compat_group():
+    group = bpy.data.node_groups.get(EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_NAME)
+    if group is not None and group.bl_idname != "ShaderNodeTree":
+        group.name = _make_backup_name(bpy.data.node_groups, EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_NAME, "__OLD")
+        group = None
+    if group is None:
+        group = bpy.data.node_groups.new(EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_NAME, "ShaderNodeTree")
+
+    if group.get("_endfield_eevee_shader_info_lit_compat_version") == EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_VERSION:
+        return group
+
+    nodes = group.nodes
+    links = group.links
+    nodes.clear()
+    _clear_node_group_interface(group)
+
+    interface = group.interface
+    interface.new_socket(name="WorldPosition", in_out="INPUT", socket_type="NodeSocketVector")
+    interface.new_socket(name="Normal", in_out="INPUT", socket_type="NodeSocketVector")
+    interface.new_socket(name="Diffuse Shading", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Cast Shadows", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Self Shadows", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    interface.new_socket(name="Ambient Lighting", in_out="OUTPUT", socket_type="NodeSocketColor")
+    interface.new_socket(name="Half-lambert factor", in_out="OUTPUT", socket_type="NodeSocketFloat")
+
+    group_input = nodes.new("NodeGroupInput")
+    group_input.location = (-860.0, 0.0)
+
+    normalize = nodes.new("ShaderNodeVectorMath")
+    normalize.operation = "NORMALIZE"
+    normalize.location = (-620.0, 40.0)
+
+    diffuse = nodes.new("ShaderNodeBsdfDiffuse")
+    diffuse.location = (-380.0, 40.0)
+    diffuse.inputs["Color"].default_value = (1.0, 1.0, 1.0, 1.0)
+
+    shader_to_rgb = nodes.new("ShaderNodeShaderToRGB")
+    shader_to_rgb.location = (-120.0, 40.0)
+
+    rgb_to_bw = nodes.new("ShaderNodeRGBToBW")
+    rgb_to_bw.location = (120.0, 40.0)
+
+    half_lambert = nodes.new("ShaderNodeMath")
+    half_lambert.operation = "MULTIPLY_ADD"
+    half_lambert.use_clamp = True
+    half_lambert.inputs[1].default_value = 0.5
+    half_lambert.inputs[2].default_value = 0.5
+    half_lambert.location = (360.0, -120.0)
+
+    group_output = nodes.new("NodeGroupOutput")
+    group_output.location = (640.0, 20.0)
+
+    links.new(group_input.outputs["Normal"], normalize.inputs[0])
+    links.new(normalize.outputs["Vector"], diffuse.inputs["Normal"])
+    links.new(diffuse.outputs["BSDF"], shader_to_rgb.inputs["Shader"])
+    links.new(shader_to_rgb.outputs["Color"], rgb_to_bw.inputs["Color"])
+    links.new(shader_to_rgb.outputs["Color"], group_output.inputs["Ambient Lighting"])
+    links.new(rgb_to_bw.outputs["Val"], group_output.inputs["Diffuse Shading"])
+    links.new(rgb_to_bw.outputs["Val"], group_output.inputs["Cast Shadows"])
+    links.new(rgb_to_bw.outputs["Val"], group_output.inputs["Self Shadows"])
+    links.new(rgb_to_bw.outputs["Val"], half_lambert.inputs[0])
+    links.new(half_lambert.outputs["Value"], group_output.inputs["Half-lambert factor"])
+
+    group["_endfield_eevee_shader_info_lit_compat_version"] = EEVEE_SHADER_INFO_LIT_COMPAT_GROUP_VERSION
+    return group
+
+
+def _ensure_eevee_screenspace_info_compat_group():
+    group = bpy.data.node_groups.get(EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_NAME)
+    if group is not None and group.bl_idname != "ShaderNodeTree":
+        group.name = _make_backup_name(bpy.data.node_groups, EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_NAME, "__OLD")
+        group = None
+    if group is None:
+        group = bpy.data.node_groups.new(EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_NAME, "ShaderNodeTree")
+
+    if group.get("_endfield_eevee_screenspace_info_compat_version") == EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_VERSION:
+        return group
+
+    nodes = group.nodes
+    links = group.links
+    nodes.clear()
+    _clear_node_group_interface(group)
+
+    interface = group.interface
+    interface.new_socket(name="View Position", in_out="INPUT", socket_type="NodeSocketVector")
+    interface.new_socket(name="Scene Color", in_out="OUTPUT", socket_type="NodeSocketColor")
+    interface.new_socket(name="Scene Depth", in_out="OUTPUT", socket_type="NodeSocketFloat")
+
+    group_input = nodes.new("NodeGroupInput")
+    group_input.location = (-520.0, 0.0)
+
+    separate_xyz = nodes.new("ShaderNodeSeparateXYZ")
+    separate_xyz.location = (-280.0, -80.0)
+
+    abs_depth = nodes.new("ShaderNodeMath")
+    abs_depth.operation = "ABSOLUTE"
+    abs_depth.location = (-40.0, -80.0)
+
+    scene_color = nodes.new("ShaderNodeRGB")
+    scene_color.location = (-40.0, 80.0)
+    scene_color.outputs["Color"].default_value = (0.0, 0.0, 0.0, 1.0)
+
+    group_output = nodes.new("NodeGroupOutput")
+    group_output.location = (200.0, 0.0)
+
+    links.new(group_input.outputs["View Position"], separate_xyz.inputs["Vector"])
+    links.new(separate_xyz.outputs["Z"], abs_depth.inputs[0])
+    links.new(scene_color.outputs["Color"], group_output.inputs["Scene Color"])
+    links.new(abs_depth.outputs["Value"], group_output.inputs["Scene Depth"])
+
+    group["_endfield_eevee_screenspace_info_compat_version"] = EEVEE_SCREENSPACE_INFO_COMPAT_GROUP_VERSION
+    return group
+
+
+def _is_shader_info_placeholder_node(node) -> bool:
+    if node is None or getattr(node, "bl_idname", "") != "NodeUndefined":
+        return False
+    if node.get("_endfield_eevee_compat_disabled"):
+        return False
+    label = f"{getattr(node, 'name', '')} {getattr(node, 'label', '')}".lower()
+    return "shader info" in label or "shaderinfo" in label
+
+
+def _is_screenspace_info_placeholder_node(node) -> bool:
+    if node is None or getattr(node, "bl_idname", "") != "NodeUndefined":
+        return False
+    if node.get("_endfield_eevee_compat_disabled"):
+        return False
+    label = f"{getattr(node, 'name', '')} {getattr(node, 'label', '')}".lower()
+    return "screenspace info" in label or "screen space info" in label
+
+
+def _node_tree_uses_face_shader_compat(node_tree) -> bool:
+    if node_tree is None:
+        return False
+    name = getattr(node_tree, "name", "")
+    return "FaceBase" in name or "BaseFace" in name
+
+def _copy_socket_default_value(source_socket, target_socket):
+    if not hasattr(source_socket, "default_value") or not hasattr(target_socket, "default_value"):
+        return
+    try:
+        value = source_socket.default_value
+        if hasattr(value, "copy"):
+            value = value.copy()
+        elif isinstance(value, (list, tuple)):
+            value = tuple(value)
+        target_socket.default_value = value
+    except Exception:
+        pass
+
+
+def _find_socket_by_name(sockets, socket_name: str):
+    if not socket_name:
+        return None
+    socket = sockets.get(socket_name)
+    if socket is not None:
+        return socket
+    for item in sockets:
+        if item.name == socket_name:
+            return item
+    return None
+
+
+def _replace_undefined_placeholder(node_tree, node, compat_group, compat_label: str) -> int:
+    input_links = {}
+    input_defaults = {}
+    output_links = []
+    for socket in node.inputs:
+        if socket.is_linked and socket.links:
+            from_socket = socket.links[0].from_socket
+            input_links[socket.name] = (from_socket.node, from_socket.name)
+        else:
+            input_defaults[socket.name] = socket
+    for socket in node.outputs:
+        for link in socket.links:
+            to_socket = link.to_socket
+            output_links.append((socket.name, to_socket.node, to_socket.name))
+
+    old_state = {
+        "name": node.name,
+        "label": node.label,
+        "location": tuple(node.location),
+        "parent": node.parent,
+        "width": getattr(node, "width", 140.0),
+        "hide": getattr(node, "hide", False),
+        "mute": getattr(node, "mute", False),
+        "use_custom_color": getattr(node, "use_custom_color", False),
+        "color": tuple(getattr(node, "color", (0.608, 0.608, 0.608))),
+    }
+
+    new_node = node_tree.nodes.new("ShaderNodeGroup")
+    new_node.node_tree = compat_group
+    new_node.name = f"{old_state['name']}_Compat"
+    new_node.label = old_state["label"] or f"{compat_label} (Compat)"
+    new_node.location = old_state["location"]
+    new_node.parent = old_state["parent"]
+    new_node.width = old_state["width"]
+    new_node.hide = old_state["hide"]
+    new_node.mute = old_state["mute"]
+    new_node.use_custom_color = old_state["use_custom_color"]
+    if old_state["use_custom_color"]:
+        new_node.color = old_state["color"]
+
+    for socket in node.inputs:
+        for link in list(socket.links):
+            node_tree.links.remove(link)
+    for socket in node.outputs:
+        for link in list(socket.links):
+            node_tree.links.remove(link)
+
+    for socket_name, (from_node, from_socket_name) in input_links.items():
+        target_socket = _find_socket_by_name(new_node.inputs, socket_name)
+        from_socket = _find_socket_by_name(from_node.outputs, from_socket_name) if from_node is not None else None
+        if target_socket is not None and from_socket is not None:
+            node_tree.links.new(from_socket, target_socket)
+    for socket_name, source_socket in input_defaults.items():
+        target_socket = _find_socket_by_name(new_node.inputs, socket_name)
+        if target_socket is not None:
+            _copy_socket_default_value(source_socket, target_socket)
+    for socket_name, to_node, to_socket_name in output_links:
+        from_socket = _find_socket_by_name(new_node.outputs, socket_name)
+        to_socket = _find_socket_by_name(to_node.inputs, to_socket_name) if to_node is not None else None
+        if from_socket is not None and to_socket is not None:
+            node_tree.links.new(from_socket, to_socket)
+
+    node["_endfield_eevee_compat_disabled"] = True
+    node.label = f"{compat_label} (Legacy Disabled)"
+    node.hide = True
+    node.location = (old_state["location"][0], old_state["location"][1] - 180.0)
+    return 1
+
+
+def _replace_shader_info_placeholder(node_tree, node, compat_group) -> int:
+    return _replace_undefined_placeholder(node_tree, node, compat_group, "Shader Info")
+
+
+def _replace_screenspace_info_placeholder(node_tree, node, compat_group) -> int:
+    return _replace_undefined_placeholder(node_tree, node, compat_group, "Screenspace Info")
+
+
+def _patch_node_tree_for_eevee_compat(node_tree, visited=None) -> int:
+    if not _requires_eevee_compat():
+        return 0
+    if not node_tree:
+        return 0
+
+    visited = visited or set()
+    tree_key = node_tree.as_pointer()
+    if tree_key in visited:
+        return 0
+    visited.add(tree_key)
+
+    patched = 0
+    for node in list(node_tree.nodes):
+        if node.type == "GROUP" and node.node_tree:
+            patched += _patch_node_tree_for_eevee_compat(node.node_tree, visited)
+
+    shader_compat_group = None
+    shader_lit_compat_group = None
+    screenspace_compat_group = None
+    for node in list(node_tree.nodes):
+        if _is_shader_info_placeholder_node(node):
+            if _node_tree_uses_face_shader_compat(node_tree):
+                if shader_compat_group is None:
+                    shader_compat_group = _ensure_eevee_shader_info_compat_group()
+                patched += _replace_shader_info_placeholder(node_tree, node, shader_compat_group)
+            else:
+                if shader_lit_compat_group is None:
+                    shader_lit_compat_group = _ensure_eevee_shader_info_lit_compat_group()
+                patched += _replace_shader_info_placeholder(node_tree, node, shader_lit_compat_group)
+            continue
+        if _is_screenspace_info_placeholder_node(node):
+            if screenspace_compat_group is None:
+                screenspace_compat_group = _ensure_eevee_screenspace_info_compat_group()
+            patched += _replace_screenspace_info_placeholder(node_tree, node, screenspace_compat_group)
+    return patched
+
+
+def _looks_like_endfield_node_tree(node_tree) -> bool:
+    if not node_tree:
+        return False
+    if node_tree.get("_endfield_face_group_local"):
+        return True
+    name = node_tree.name.lower()
+    if "endfield" in name:
+        return True
+    for keywords in SHADER_GROUP_KEYWORDS.values():
+        for keyword in keywords:
+            if keyword.lower() in name:
+                return True
+    return False
+
+
+def _patch_material_for_eevee_compat(material, visited=None) -> int:
+    if not _requires_eevee_compat():
+        return 0
+    if not material or not material.use_nodes or not material.node_tree:
+        return 0
+    return _patch_node_tree_for_eevee_compat(material.node_tree, visited=visited)
+
+
+def _patch_all_endfield_materials_for_eevee_compat() -> int:
+    if not _requires_eevee_compat():
+        return 0
+    visited = set()
+    patched = 0
+    for material in bpy.data.materials:
+        if _find_main_shader_node(material) is None:
+            continue
+        patched += _patch_material_for_eevee_compat(material, visited=visited)
+    for node_tree in bpy.data.node_groups:
+        if getattr(node_tree, "bl_idname", "") != "ShaderNodeTree":
+            continue
+        if not _looks_like_endfield_node_tree(node_tree):
+            continue
+        patched += _patch_node_tree_for_eevee_compat(node_tree, visited=visited)
+    return patched
 
 
 def _prime_preset_resources(settings: ENDFIELD_PG_Settings):
@@ -1084,6 +1815,27 @@ def _load_image(path_value: str, colorspace: str):
     return image
 
 
+def _role_path_looks_suspicious(path_value: str, role_id: str, base_path: str = "") -> bool:
+    if not path_value or role_id == "tex_d":
+        return False
+
+    abs_path = _safe_abs_path(path_value)
+    if not abs_path or not os.path.exists(abs_path):
+        return False
+
+    if base_path and _same_file_path(path_value, base_path):
+        score = _texture_filename_match_score(os.path.basename(abs_path), role_id)
+        return score <= 0
+
+    return False
+
+
+def _load_role_image(path_value: str, colorspace: str, role_id: str = "", base_path: str = ""):
+    if role_id and _role_path_looks_suspicious(path_value, role_id, base_path):
+        return None
+    return _load_image(path_value, colorspace)
+
+
 def _placeholder_rgba_for_role(role_id: str):
     if role_id == "tex_n":
         return (0.5, 0.5, 1.0, 1.0)
@@ -1118,6 +1870,74 @@ def _iter_tex_image_nodes(material):
     return [node for node in material.node_tree.nodes if node.type == "TEX_IMAGE"]
 
 
+def _normalize_socket_name(socket_name: str) -> str:
+    value = (socket_name or "").strip().casefold()
+    replacements = {
+        "（": "(",
+        "）": ")",
+        "【": "[",
+        "】": "]",
+        "。": ".",
+        "，": ",",
+        "：": ":",
+        "；": ";",
+        "－": "-",
+        "　": "",
+        " ": "",
+        "non-color": "non_color",
+    }
+    for source, target in replacements.items():
+        value = value.replace(source, target)
+    return value
+
+
+def _classify_texture_input_socket(socket_name: str) -> str:
+    normalized = _normalize_socket_name(socket_name)
+
+    if normalized in {"_d(srgb)r.g.b", "_d(srgb)rgb", "_d(srgb)color"}:
+        return "tex_d_color"
+    if normalized in {"_d(srgb).a", "_d(srgb)a", "d_alpha"}:
+        return "tex_d_alpha"
+
+    if normalized.startswith("_n(") or normalized == "_n":
+        if normalized.endswith(".a") or normalized.endswith(")a"):
+            return "tex_n_alpha"
+        return "tex_n_color"
+    if normalized.startswith("_hn(") or normalized == "_hn":
+        if normalized.endswith(".a") or normalized.endswith(")a"):
+            return "tex_n_alpha"
+        return "tex_n_color"
+
+    if normalized.startswith("_p(") or normalized == "_p":
+        if normalized.endswith(".a") or normalized.endswith(")a"):
+            return "tex_p_alpha"
+        return "tex_p_color"
+
+    if normalized in {
+        "_m",
+        "_m(non_color)",
+        "_m(non_color)r.g.b",
+        "_m(非色彩)",
+        "_m(非色彩)r.g.b",
+        "_m(非色彩non_color)",
+        "_m(非色彩non_color)r.g.b",
+    }:
+        return "tex_m_color"
+
+    if normalized in {
+        "_e",
+        "_e(non_color)",
+        "_e(non_color)r.g.b",
+        "_e(非色彩)",
+        "_e(非色彩)r.g.b",
+        "_e(非色彩non_color)",
+        "_e(非色彩non_color)r.g.b",
+    }:
+        return "tex_e_color"
+
+    return ""
+
+
 def _node_signature(node) -> str:
     parts = [node.name.lower(), node.label.lower()]
     image = getattr(node, "image", None)
@@ -1126,6 +1946,29 @@ def _node_signature(node) -> str:
         if image.filepath:
             parts.append(image.filepath.lower())
     return " ".join(parts)
+
+
+def _collect_upstream_tex_image_nodes(socket, add_node, visited):
+    if socket is None:
+        return
+    node = getattr(socket, "node", None)
+    if node is None:
+        return
+
+    key = (node.as_pointer(), getattr(socket, "identifier", socket.name))
+    if key in visited:
+        return
+    visited.add(key)
+
+    if node.type == "TEX_IMAGE":
+        add_node(node)
+        return
+
+    for input_socket in getattr(node, "inputs", ()):
+        if not input_socket.is_linked:
+            continue
+        for link in input_socket.links:
+            _collect_upstream_tex_image_nodes(link.from_socket, add_node, visited)
 
 
 def _find_nodes_for_role(material, role_id: str):
@@ -1146,15 +1989,12 @@ def _find_nodes_for_role(material, role_id: str):
 
     sockets = _shader_input_sockets_for_role(material, role_id)
     if sockets:
+        visited = set()
         for socket in sockets.values():
             if not socket or not socket.is_linked:
                 continue
             for link in socket.links:
-                source_node = getattr(link.from_socket, "node", None)
-                if source_node and source_node.type == "TEX_IMAGE":
-                    add_node(source_node)
-
-    if found:
+                _collect_upstream_tex_image_nodes(link.from_socket, add_node, visited)
         return found
 
     tags = ROLE_SEARCH_TAGS.get(role_id, [])
@@ -1177,32 +2017,29 @@ def _shader_input_sockets_for_role(material, role_id: str):
     if group_node is None:
         return {}
 
-    def matches(socket_name: str, keywords):
-        name = socket_name.lower()
-        return any(keyword in name for keyword in keywords)
-
     inputs = {}
     for socket in group_node.inputs:
+        tag = _classify_texture_input_socket(socket.name)
         if role_id == "tex_d":
-            if matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_d_color"]):
+            if tag == "tex_d_color":
                 inputs["color"] = socket
-            elif matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_d_alpha"]):
+            elif tag == "tex_d_alpha":
                 inputs["alpha"] = socket
         elif role_id == "tex_n":
-            if matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_n_color"]):
+            if tag == "tex_n_color":
                 inputs["color"] = socket
-            elif matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_n_alpha"]):
+            elif tag == "tex_n_alpha":
                 inputs["alpha"] = socket
         elif role_id == "tex_p":
-            if matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_p_color"]):
+            if tag == "tex_p_color":
                 inputs["color"] = socket
-            elif matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_p_alpha"]):
+            elif tag == "tex_p_alpha":
                 inputs["alpha"] = socket
         elif role_id == "tex_m":
-            if matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_m_color"]):
+            if tag == "tex_m_color":
                 inputs["color"] = socket
         elif role_id == "tex_e":
-            if matches(socket.name, ROLE_SOCKET_KEYWORDS["tex_e_color"]):
+            if tag == "tex_e_color":
                 inputs["color"] = socket
     return inputs
 
@@ -1288,10 +2125,35 @@ def _rebind_outline_material_textures(material, loaded_images):
 
 def _load_images_from_settings(settings: ENDFIELD_PG_Settings):
     loaded = {}
+    base_path = getattr(settings, "tex_d", "")
     for slot in TEXTURE_SLOT_LAYOUT[settings.shader_type]:
-        image = _load_image(getattr(settings, slot.prop_id), slot.colorspace)
+        image = _load_role_image(getattr(settings, slot.prop_id), slot.colorspace, slot.prop_id, base_path=base_path)
         if image:
             loaded[slot.prop_id] = image
+    return loaded
+
+
+def _apply_face_special_images(material, settings: ENDFIELD_PG_Settings):
+    if material is None or _detect_shader_type_from_material(material) != "FACE":
+        return {}
+
+    node_tree = _ensure_local_face_shader_group(material)
+    if node_tree is None:
+        return {}
+
+    loaded = {}
+    sdf_image = _load_role_image(getattr(settings, "face_sdf_tex", ""), "Non-Color", "face_sdf_tex", base_path=getattr(settings, "tex_d", ""))
+    if sdf_image is not None:
+        for node in _find_face_sdf_image_nodes(node_tree):
+            node.image = sdf_image
+        loaded["face_sdf_tex"] = sdf_image
+
+    cm_image = _load_role_image(getattr(settings, "face_cm_tex", ""), "Non-Color", "face_cm_tex", base_path=getattr(settings, "tex_d", ""))
+    if cm_image is not None:
+        for node in _find_face_cm_image_nodes(node_tree):
+            node.image = cm_image
+        loaded["face_cm_tex"] = cm_image
+
     return loaded
 
 
@@ -1392,6 +2254,7 @@ def _ensure_outline_material_instance(
         material = template.copy()
         material.name = material_name
 
+    _patch_material_for_eevee_compat(material)
     _rebind_outline_material_textures(material, loaded_images)
     if hasattr(material, "use_backface_culling"):
         material.use_backface_culling = True
@@ -1458,9 +2321,10 @@ def _apply_textures(material, settings: ENDFIELD_PG_Settings, shader_type: str =
     shader_type = shader_type or settings.shader_type
     loaded = {}
     role_presence = {}
+    base_path = getattr(settings, "tex_d", "")
 
     for slot in TEXTURE_SLOT_LAYOUT[shader_type]:
-        image = _load_image(getattr(settings, slot.prop_id), slot.colorspace)
+        image = _load_role_image(getattr(settings, slot.prop_id), slot.colorspace, slot.prop_id, base_path=base_path)
         if image:
             loaded[slot.prop_id] = image
         else:
@@ -1469,6 +2333,8 @@ def _apply_textures(material, settings: ENDFIELD_PG_Settings, shader_type: str =
             node.image = image
 
     _ensure_alpha_links(material)
+    if shader_type == "FACE":
+        loaded.update(_apply_face_special_images(material, settings))
     if _has_alpha(loaded.get("tex_d"), material.name):
         shader_type = _detect_shader_type_from_material(material) or settings.shader_type
         if shader_type not in {"PUPIL", "BROW"}:
@@ -1477,6 +2343,7 @@ def _apply_textures(material, settings: ENDFIELD_PG_Settings, shader_type: str =
     for slot in TEXTURE_SLOT_LAYOUT[shader_type]:
         role_presence[slot.prop_id] = _role_has_usable_image(material, slot.prop_id)
 
+    _apply_material_quality_correction(material, shader_type, role_presence)
     return loaded, role_presence
 
 
@@ -1706,7 +2573,8 @@ def _guess_texture_by_scan(base_path: str, role_id: str) -> str:
         return ""
 
     valid_ext = {".png", ".tga", ".jpg", ".jpeg", ".bmp", ".webp", ".dds", ext.lower()}
-    keywords = ROLE_SEARCH_TAGS.get(role_id, [])
+    best_path = ""
+    best_score = 0
     for entry in os.listdir(folder):
         entry_lower = entry.lower()
         full = os.path.join(folder, entry)
@@ -1716,9 +2584,147 @@ def _guess_texture_by_scan(base_path: str, role_id: str) -> str:
             continue
         if prefix.lower() not in entry_lower:
             continue
-        if any(tag in entry_lower for tag in keywords):
-            return full
+        score = _texture_filename_match_score(entry, role_id)
+        if score > best_score:
+            best_score = score
+            best_path = full
+
+    if best_path:
+        return best_path
+
+    fallback = _guess_texture_by_generic_scan(folder, prefix.lower(), stem.lower(), valid_ext, role_id)
+    if fallback:
+        return fallback
     return ""
+
+
+def _texture_category_tokens(stem_lower: str):
+    tokens = []
+    for token in ("body", "cloth", "face", "hair", "eye", "iris", "brow", "lash"):
+        if token in stem_lower:
+            tokens.append(token)
+    return tuple(dict.fromkeys(tokens))
+
+
+def _texture_filename_match_score(entry_name: str, role_id: str) -> int:
+    stem_lower = os.path.splitext(entry_name)[0].lower()
+
+    if role_id == "tex_n":
+        if stem_lower.endswith("_hn"):
+            return 140
+        if stem_lower.endswith("_n"):
+            return 130
+        if re.search(r"(?:^|_)normal(?:$|_)", stem_lower):
+            return 110
+        return 0
+
+    if role_id == "tex_p":
+        if stem_lower.endswith("_lightmap"):
+            return 140
+        if stem_lower.endswith("_ilm"):
+            return 135
+        if stem_lower.endswith("_id"):
+            return 130
+        if stem_lower.endswith("_p"):
+            return 125
+        return 0
+
+    if role_id == "tex_m":
+        if any(token in stem_lower for token in ("cm_m", "hl_m", "eyeshadow", "hairshadow", "_lut_")):
+            return 0
+        if stem_lower.endswith("_orm") or stem_lower.endswith("_rma"):
+            return 145
+        if stem_lower.endswith("_m"):
+            score = 120
+            if "_sw_m" in stem_lower:
+                score += 8
+            return score
+        return 0
+
+    if role_id == "tex_st":
+        if stem_lower.endswith("_st"):
+            return 130
+        if stem_lower.endswith("_mask"):
+            return 120
+        if "outline" in stem_lower:
+            return 110
+        return 0
+
+    if role_id == "tex_e":
+        if stem_lower.endswith("_em"):
+            return 135
+        if stem_lower.endswith("_e"):
+            return 130
+        if stem_lower.endswith("_emission"):
+            return 125
+        return 0
+
+    if role_id == "face_sdf_tex":
+        if "sdf" in stem_lower:
+            return 150
+        return 0
+
+    if role_id == "face_cm_tex":
+        if "cm_m" in stem_lower:
+            return 150
+        return 0
+
+    return 0
+
+
+def _guess_texture_by_generic_scan(folder: str, prefix_lower: str, stem_lower: str, valid_ext, role_id: str) -> str:
+    rules = GENERIC_TEXTURE_SCAN_RULES.get(role_id)
+    if not rules:
+        return ""
+
+    category_tokens = _texture_category_tokens(stem_lower)
+    best_path = ""
+    best_score = 0
+
+    for entry in os.listdir(folder):
+        entry_lower = entry.lower()
+        full = os.path.join(folder, entry)
+        if not os.path.isfile(full):
+            continue
+        if os.path.splitext(entry)[1].lower() not in valid_ext:
+            continue
+
+        match_score = _texture_filename_match_score(entry, role_id)
+        if match_score <= 0:
+            continue
+
+        score = match_score
+        if prefix_lower and prefix_lower in entry_lower:
+            score += 40
+        if category_tokens:
+            if any(token in entry_lower for token in category_tokens):
+                score += 35
+            else:
+                score -= 25
+
+        for token in rules["prefer"]:
+            if token in entry_lower:
+                score += 12
+        for token in rules["avoid"]:
+            if token in entry_lower:
+                score -= 25
+
+        if role_id == "face_cm_tex" and "body" in entry_lower:
+            score -= 40
+        if role_id == "face_sdf_tex" and "female_face" in entry_lower:
+            score += 25
+        if role_id == "tex_n" and "body" in category_tokens and "common" in entry_lower:
+            score += 10
+        if role_id == "tex_m" and "body" in entry_lower:
+            score += 8
+        if role_id == "tex_m" and "cloth" in entry_lower:
+            score += 8
+
+        if score > best_score:
+            best_score = score
+            best_path = full
+
+    return best_path if best_score > 0 else ""
 
 
 def _autofill_missing_texture_paths(settings: ENDFIELD_PG_Settings) -> int:
@@ -1730,8 +2736,11 @@ def _autofill_missing_texture_paths(settings: ENDFIELD_PG_Settings) -> int:
     for role_id, suffixes in ROLE_SUFFIX_CANDIDATES.items():
         if role_id not in required_roles:
             continue
-        if getattr(settings, role_id):
+        current_value = getattr(settings, role_id)
+        if current_value and not _role_path_looks_suspicious(current_value, role_id, settings.tex_d):
             continue
+        if current_value and _role_path_looks_suspicious(current_value, role_id, settings.tex_d):
+            setattr(settings, role_id, "")
 
         guessed = ""
         for suffix in suffixes:
@@ -1743,6 +2752,18 @@ def _autofill_missing_texture_paths(settings: ENDFIELD_PG_Settings) -> int:
         if guessed:
             setattr(settings, role_id, guessed)
             filled += 1
+
+    if settings.shader_type == "FACE":
+        for role_id in ("face_sdf_tex", "face_cm_tex"):
+            current_value = getattr(settings, role_id)
+            if current_value and not _role_path_looks_suspicious(current_value, role_id, settings.tex_d):
+                continue
+            if current_value and _role_path_looks_suspicious(current_value, role_id, settings.tex_d):
+                setattr(settings, role_id, "")
+            guessed = _guess_texture_by_scan(settings.tex_d, role_id)
+            if guessed:
+                setattr(settings, role_id, guessed)
+                filled += 1
     return filled
 
 
@@ -2054,7 +3075,7 @@ def _target_matrix(target, subtarget=""):
     return target.matrix_world.copy()
 
 
-def _ensure_child_of_constraint(obj, name: str, target=None, subtarget: str = ""):
+def _ensure_child_of_constraint(obj, name: str, target=None, subtarget: str = "", inverse_matrix=None):
     constraint = None
     for item in obj.constraints:
         if item.type == "CHILD_OF" and item.name == name:
@@ -2067,7 +3088,12 @@ def _ensure_child_of_constraint(obj, name: str, target=None, subtarget: str = ""
     constraint.target = target
     constraint.subtarget = subtarget
     bpy.context.view_layer.update()
-    if hasattr(constraint, "set_inverse_pending"):
+    if inverse_matrix is not None:
+        try:
+            constraint.inverse_matrix = inverse_matrix.copy()
+        except Exception:
+            constraint.inverse_matrix = inverse_matrix
+    elif hasattr(constraint, "set_inverse_pending"):
         constraint.set_inverse_pending = True
     bpy.context.view_layer.update()
     return constraint
@@ -2116,8 +3142,10 @@ def _replace_child_of_constraint(obj, name: str, target=None, subtarget: str = "
     desired_world = desired_world.copy() if desired_world is not None else obj.matrix_world.copy()
     _remove_child_of_constraints(obj)
     bpy.context.view_layer.update()
-    obj.matrix_world = desired_world
-    return _ensure_child_of_constraint(obj, name, target, subtarget)
+    target_matrix = _target_matrix(target, subtarget) if target is not None else Matrix.Identity(4)
+    local_matrix = target_matrix.inverted_safe() @ desired_world if target is not None else desired_world
+    obj.matrix_world = local_matrix
+    return _ensure_child_of_constraint(obj, name, target, subtarget, inverse_matrix=Matrix.Identity(4))
 
 
 def _set_object_info_target(node, target_obj) -> bool:
@@ -2192,6 +3220,273 @@ def _sync_material_alpha_settings(material, template):
             pass
 
 
+def _apply_named_settings(target, values):
+    if target is None:
+        return
+    for attr_name, value in values.items():
+        if not hasattr(target, attr_name):
+            continue
+        try:
+            setattr(target, attr_name, value)
+        except Exception:
+            pass
+
+
+def _apply_preset_scene_settings(scene):
+    if scene is None:
+        return
+    if hasattr(scene, "render") and hasattr(scene.render, "engine"):
+        try:
+            scene.render.engine = PRESET_RENDER_ENGINE
+        except Exception:
+            pass
+    if hasattr(scene, "render"):
+        _apply_named_settings(scene.render, PRESET_RENDER_DEFAULTS)
+    if hasattr(scene, "view_settings"):
+        _apply_named_settings(scene.view_settings, PRESET_VIEW_DEFAULTS)
+    if hasattr(scene, "eevee"):
+        _apply_named_settings(scene.eevee, PRESET_EEVEE_DEFAULTS)
+
+
+def _apply_preset_sun_settings(light_obj):
+    if light_obj is None or light_obj.type != "LIGHT" or light_obj.data is None:
+        return
+    light_obj.data.type = "SUN"
+    light_obj.data.energy = 1.0
+    if hasattr(light_obj.data, "angle"):
+        light_obj.data.angle = 0.009180432185530663
+    if hasattr(light_obj.data, "use_shadow"):
+        light_obj.data.use_shadow = True
+    if hasattr(light_obj.data, "use_contact_shadow"):
+        light_obj.data.use_contact_shadow = False
+
+
+def _strip_old_markers(name: str) -> str:
+    if not name:
+        return ""
+    cleaned = name
+    while "__OLD" in cleaned:
+        cleaned = cleaned.replace("__OLD", "")
+    cleaned = re.sub(r"\.{2,}", ".", cleaned).strip(".")
+    return cleaned
+
+
+def _legacy_name_candidates(name: str):
+    raw = name or ""
+    stripped = _strip_old_markers(raw)
+    candidates = []
+    for candidate in (
+        raw,
+        stripped,
+        re.sub(r"(?:\.\d{3})+$", "", stripped),
+        re.sub(r"\.\d{3}", "", stripped),
+    ):
+        candidate = (candidate or "").strip(".")
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _node_group_replacement_score(source_name: str, candidate_name: str) -> int:
+    score = -1
+    for base_name in _legacy_name_candidates(source_name):
+        if candidate_name == base_name:
+            score = max(score, 120)
+        if _name_matches_datablock(base_name, candidate_name) or _name_matches_datablock(candidate_name, base_name):
+            score = max(score, 100)
+        if re.sub(r"\.\d{3}", "", candidate_name) == re.sub(r"\.\d{3}", "", base_name):
+            score = max(score, 80)
+    return score
+
+
+def _node_group_needs_repair(source_group, current_stamp: str = "") -> bool:
+    if source_group is None:
+        return False
+    if "__OLD" in source_group.name:
+        return True
+    group_stamp = source_group.get(SOURCE_LIBRARY_STAMP_KEY)
+    if current_stamp and group_stamp and group_stamp != current_stamp:
+        return True
+    return False
+
+
+def _find_best_library_node_group_name(source_name: str, library_path: str, current_stamp: str = ""):
+    if not library_path or not os.path.exists(library_path):
+        return ""
+    try:
+        with bpy.data.libraries.load(library_path, link=False) as (data_from, _data_to):
+            available_names = list(data_from.node_groups)
+    except Exception:
+        return ""
+
+    best_name = ""
+    best_score = -1
+    for candidate_name in available_names:
+        if "__OLD" in candidate_name:
+            continue
+        score = _node_group_replacement_score(source_name, candidate_name)
+        if score < 0:
+            continue
+        loaded_candidate = bpy.data.node_groups.get(candidate_name)
+        if current_stamp and loaded_candidate is not None and loaded_candidate.get(SOURCE_LIBRARY_STAMP_KEY) == current_stamp:
+            score += 10
+        if score > best_score:
+            best_name = candidate_name
+            best_score = score
+    return best_name
+
+
+def _find_replacement_node_group(source_group, library_path: str = ""):
+    if source_group is None:
+        return None
+    current_stamp = _library_stamp(library_path)
+    if not _node_group_needs_repair(source_group, current_stamp):
+        return None
+    best_group = None
+    best_score = -1
+    for candidate in bpy.data.node_groups:
+        if candidate == source_group:
+            continue
+        if candidate.bl_idname != source_group.bl_idname:
+            continue
+        if "__OLD" in candidate.name:
+            continue
+        score = _node_group_replacement_score(source_group.name, candidate.name)
+        if score < 0:
+            continue
+        if current_stamp and candidate.get(SOURCE_LIBRARY_STAMP_KEY) == current_stamp:
+            score += 10
+        if score > best_score:
+            best_group = candidate
+            best_score = score
+    if best_group is None and library_path:
+        library_group_name = _find_best_library_node_group_name(source_group.name, library_path, current_stamp=current_stamp)
+        if library_group_name:
+            candidate = _find_or_append_node_group_by_name(library_path, library_group_name, tree_type=source_group.bl_idname)
+            if candidate is not None and candidate != source_group and "__OLD" not in candidate.name:
+                best_group = candidate
+    return best_group
+
+
+def _repair_node_tree_group_links(node_tree, library_path: str = "", visited=None):
+    if node_tree is None:
+        return 0
+    visited = visited or set()
+    tree_key = node_tree.as_pointer()
+    if tree_key in visited:
+        return 0
+    visited.add(tree_key)
+
+    repaired = 0
+    for node in node_tree.nodes:
+        if node.type != "GROUP" or not node.node_tree:
+            continue
+        replacement = _find_replacement_node_group(node.node_tree, library_path)
+        if replacement is not None and replacement != node.node_tree:
+            node.node_tree = replacement
+            repaired += 1
+        repaired += _repair_node_tree_group_links(node.node_tree, library_path, visited)
+    return repaired
+
+
+def _repair_legacy_material_node_groups(settings: ENDFIELD_PG_Settings):
+    library = _effective_library_path(settings)
+    if _requires_eevee_compat():
+        _ensure_eevee_shader_info_compat_group()
+    repaired = 0
+    visited = set()
+    for material in bpy.data.materials:
+        if not material or not material.use_nodes or not material.node_tree:
+            continue
+        repaired += _repair_node_tree_group_links(material.node_tree, library, visited)
+        _patch_material_for_eevee_compat(material)
+    return repaired
+
+
+def _repair_legacy_modifier_node_groups(settings: ENDFIELD_PG_Settings):
+    library = _effective_library_path(settings)
+    repaired = 0
+    for obj in bpy.data.objects:
+        for modifier in obj.modifiers:
+            if modifier.type != "NODES" or modifier.node_group is None:
+                continue
+            replacement = _find_replacement_node_group(modifier.node_group, library)
+            if replacement is not None and replacement != modifier.node_group:
+                modifier.node_group = replacement
+                repaired += 1
+    return repaired
+
+
+def _repair_legacy_scene_bindings(settings: ENDFIELD_PG_Settings):
+    repaired = 0
+    repaired += _repair_legacy_modifier_node_groups(settings)
+    repaired += _repair_legacy_material_node_groups(settings)
+    return repaired
+
+
+def _scene_has_endfield_materials() -> bool:
+    for material in bpy.data.materials:
+        if _find_main_shader_node(material) is not None:
+            return True
+    return False
+
+
+def _scene_has_generated_endfield_scene() -> bool:
+    scene = bpy.context.scene
+    if scene is not None and getattr(scene, "world", None) is not None:
+        if scene.world.name == TARGET_WORLD_NAME:
+            return True
+    if bpy.data.collections.get(MASTER_COLLECTION_NAME) is not None:
+        return True
+    for name in (SUN_LIGHT_NAME, SUN_HELPER_LC_NAME, SUN_HELPER_LF_NAME, HEAD_HELPER_NAME, HEAD_FORWARD_NAME, HEAD_RIGHT_NAME):
+        if bpy.data.objects.get(name) is not None:
+            return True
+    for material in bpy.data.materials:
+        if not material or not material.use_nodes or not material.node_tree:
+            continue
+        for node in material.node_tree.nodes:
+            node_tree = getattr(node, "node_tree", None)
+            if node_tree is None:
+                continue
+            if "__OLD" in node_tree.name and (
+                "Arknights: Endfield" in node_tree.name or "DepthRim" in node_tree.name or "Rain" in node_tree.name
+            ):
+                return True
+    return False
+
+
+def _remove_default_endfield_scene_lights():
+    removed = []
+    if bpy.data.objects.get(SUN_LIGHT_NAME) is None and bpy.data.objects.get(SOURCE_SUN_LIGHT_NAME) is None:
+        return removed
+    target_sun = bpy.data.objects.get(SUN_LIGHT_NAME)
+    for obj in list(bpy.data.objects):
+        if obj.type != "LIGHT":
+            continue
+        should_remove = obj.name == "Light"
+        if target_sun is not None and obj != target_sun and _name_matches_datablock(SOURCE_SUN_LIGHT_NAME, obj.name):
+            should_remove = True
+        if not should_remove:
+            continue
+        removed.append(obj.name)
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+    return removed
+
+
+def _repair_current_endfield_scene(settings: ENDFIELD_PG_Settings, ensure_environment: bool = False):
+    repaired = 0
+    removed_lights = []
+    if ensure_environment:
+        _migrate_scene_environment(settings, bpy.context.scene)
+        _ensure_sun_rig(settings)
+        removed_lights = _remove_default_endfield_scene_lights()
+    repaired += _repair_legacy_scene_bindings(settings)
+    return repaired, removed_lights
+
+
 def _migrate_scene_environment(settings: ENDFIELD_PG_Settings, target_scene):
     if not settings.migrate_source_environment:
         return
@@ -2199,6 +3494,7 @@ def _migrate_scene_environment(settings: ENDFIELD_PG_Settings, target_scene):
     if world is not None:
         target_scene.world = world
         _cleanup_unused_world_backups()
+    _apply_preset_scene_settings(target_scene)
 
 
 def _ensure_sun_rig(settings: ENDFIELD_PG_Settings):
@@ -2229,7 +3525,9 @@ def _ensure_sun_rig(settings: ENDFIELD_PG_Settings):
             if utility_obj is not None:
                 _move_object_to_collection(utility_obj, utility_collection)
 
-    light_obj = _find_or_append_object(library, SUN_LIGHT_NAME) if library else bpy.data.objects.get(SUN_LIGHT_NAME)
+    light_obj = _ensure_object_alias(SUN_LIGHT_NAME, SOURCE_SUN_LIGHT_NAME)
+    if light_obj is None and library:
+        light_obj = _find_or_append_object(library, SUN_LIGHT_NAME)
     if light_obj is None or light_obj.type != "LIGHT":
         light_data = bpy.data.lights.get(SUN_LIGHT_NAME)
         if light_data is None:
@@ -2237,13 +3535,16 @@ def _ensure_sun_rig(settings: ENDFIELD_PG_Settings):
         else:
             light_data.type = "SUN"
         light_obj = bpy.data.objects.get(SUN_LIGHT_NAME) or bpy.data.objects.new(SUN_LIGHT_NAME, light_data)
+    alias_light = bpy.data.objects.get(SOURCE_SUN_LIGHT_NAME)
+    if alias_light is not None and alias_light != light_obj and alias_light.type == "LIGHT":
+        try:
+            bpy.data.objects.remove(alias_light, do_unlink=True)
+        except Exception:
+            pass
     _move_object_to_collection(light_obj, bpy.context.scene.collection, exclusive=True)
     light_obj.location = SUN_LIGHT_LOCATION
     light_obj.rotation_euler = SUN_LIGHT_ROTATION
-    light_obj.data.type = "SUN"
-    light_obj.data.energy = 1.0
-    if hasattr(light_obj.data, "angle"):
-        light_obj.data.angle = 0.009180432185530663
+    _apply_preset_sun_settings(light_obj)
     camera_obj = _ensure_scene_camera(settings, bpy.context.scene.collection)
 
     lc = _find_or_append_object(library, SUN_HELPER_LC_NAME) if library else bpy.data.objects.get(SUN_HELPER_LC_NAME)
@@ -2378,7 +3679,9 @@ def _ensure_sun_rig(settings: ENDFIELD_PG_Settings):
             if utility_obj is not None:
                 _move_object_to_collection(utility_obj, utility_collection)
 
-    light_obj = _find_or_append_object(library, SOURCE_SUN_LIGHT_NAME) if library else _ensure_object_alias(SUN_LIGHT_NAME, SOURCE_SUN_LIGHT_NAME)
+    light_obj = _ensure_object_alias(SUN_LIGHT_NAME, SOURCE_SUN_LIGHT_NAME)
+    if light_obj is None and library:
+        light_obj = _find_or_append_object(library, SOURCE_SUN_LIGHT_NAME)
     if light_obj is None or light_obj.type != "LIGHT":
         light_data = bpy.data.lights.get(SUN_LIGHT_NAME)
         if light_data is None:
@@ -2387,13 +3690,16 @@ def _ensure_sun_rig(settings: ENDFIELD_PG_Settings):
             light_data.type = "SUN"
         light_obj = bpy.data.objects.get(SUN_LIGHT_NAME) or bpy.data.objects.new(SUN_LIGHT_NAME, light_data)
     light_obj = _rename_datablock(bpy.data.objects, light_obj, SUN_LIGHT_NAME)
+    alias_light = bpy.data.objects.get(SOURCE_SUN_LIGHT_NAME)
+    if alias_light is not None and alias_light != light_obj and alias_light.type == "LIGHT":
+        try:
+            bpy.data.objects.remove(alias_light, do_unlink=True)
+        except Exception:
+            pass
     _move_object_to_collection(light_obj, bpy.context.scene.collection, exclusive=True)
     light_obj.location = SUN_LIGHT_LOCATION
     light_obj.rotation_euler = SUN_LIGHT_ROTATION
-    light_obj.data.type = "SUN"
-    light_obj.data.energy = 1.0
-    if hasattr(light_obj.data, "angle"):
-        light_obj.data.angle = 0.009180432185530663
+    _apply_preset_sun_settings(light_obj)
     camera_obj = _ensure_scene_camera(settings, bpy.context.scene.collection)
 
     lc = _find_or_append_object(library, SUN_HELPER_LC_NAME) if library else _find_matching_object(SUN_HELPER_LC_NAME)
@@ -2620,6 +3926,7 @@ def _copy_alpha_template(settings: ENDFIELD_PG_Settings, role: str, base_materia
         material = template.copy()
         material.name = target_name
 
+    _patch_material_for_eevee_compat(material)
     base_nodes = _find_nodes_for_role(base_material, "tex_d")
     source_image = base_nodes[0].image if base_nodes else None
     if source_image is None:
@@ -2774,6 +4081,108 @@ def _remove_face_subdivision_modifier(obj):
     modifier = obj.modifiers.get("Subdivision")
     if modifier is not None and modifier.type == "SUBSURF":
         obj.modifiers.remove(modifier)
+
+
+def _remove_face_generated_modifiers(obj):
+    if obj is None:
+        return
+    target_group_names = set()
+    for key in ("SUN_VEC", "FACE_VECTOR", "SMOOTH_OUTLINE", "FACE_RAYCAST", "EYE_TRANSPARENCY"):
+        target_group_names.update(GEOMETRY_NODE_PREFS.get(key, ()))
+    for modifier in list(obj.modifiers):
+        if modifier.type != "NODES":
+            continue
+        node_group_name = modifier.node_group.name if modifier.node_group else ""
+        if (
+            modifier.name in target_group_names
+            or node_group_name in target_group_names
+            or modifier.name == "Endfield Eye Attribute Patch"
+            or modifier.name.startswith(EYE_TRANSPARENCY_MODIFIER_PREFIX)
+        ):
+            obj.modifiers.remove(modifier)
+    _remove_face_subdivision_modifier(obj)
+
+
+def _is_face_helper_object(obj) -> bool:
+    if obj is None:
+        return False
+    source_names = (SOURCE_HEAD_HELPER_NAME, SOURCE_HEAD_FORWARD_NAME, SOURCE_HEAD_RIGHT_NAME)
+    if any(_name_matches_datablock(name, obj.name) for name in source_names):
+        return True
+    if obj.type != "EMPTY":
+        return False
+    helper_names = (HEAD_HELPER_NAME, HEAD_FORWARD_NAME, HEAD_RIGHT_NAME)
+    if not any(_name_matches_datablock(name, obj.name) for name in helper_names):
+        return False
+    if obj.parent is not None and _name_matches_datablock(HEAD_HELPER_NAME, obj.parent.name):
+        return True
+    if any(constraint.type == "CHILD_OF" for constraint in obj.constraints):
+        return True
+    if obj.get(SOURCE_LIBRARY_STAMP_KEY):
+        return True
+    for collection in getattr(obj, "users_collection", ()):
+        if collection.name in {HELPER_COLLECTION_NAME, UTILITY_COLLECTION_NAME, WIDGETS_COLLECTION_NAME, META_COLLECTION_NAME}:
+            return True
+    return False
+
+
+def _face_refresh_material_names(settings: ENDFIELD_PG_Settings):
+    names = list(TEMPLATE_MATERIAL_PREFS["FACE"])
+    names.extend(OUTLINE_MATERIAL_PREFS["FACE"])
+    if settings.face_integrated_eye_transparency:
+        names.extend(TEMPLATE_MATERIAL_PREFS["PUPIL"])
+        names.extend(TEMPLATE_MATERIAL_PREFS["BROW"])
+        names.extend(ALPHA_TEMPLATE_PREFS["IRIS"])
+        names.extend(ALPHA_TEMPLATE_PREFS["BROW"])
+    return tuple(dict.fromkeys(names))
+
+
+def _face_refresh_node_group_names(settings: ENDFIELD_PG_Settings):
+    names = set(SHADER_GROUP_KEYWORDS["FACE"])
+    names.add("Rain")
+    for material_name in _face_refresh_material_names(settings):
+        for material in bpy.data.materials:
+            if _name_matches_datablock(material_name, material.name):
+                names.update(_collect_material_node_group_names(material))
+    for key in ("SUN_VEC", "FACE_VECTOR", "SMOOTH_OUTLINE", "FACE_RAYCAST"):
+        names.update(GEOMETRY_NODE_PREFS.get(key, ()))
+    return tuple(sorted(names))
+
+
+def _force_clean_face_generation(settings: ENDFIELD_PG_Settings, objects):
+    if settings.shader_type != "FACE":
+        return 0
+
+    _stop_face_uv_calibration_session()
+
+    refreshed = 0
+    refreshed += _backup_matching_datablocks(
+        bpy.data.objects,
+        (
+            HEAD_HELPER_NAME,
+            HEAD_FORWARD_NAME,
+            HEAD_RIGHT_NAME,
+            SOURCE_HEAD_HELPER_NAME,
+            SOURCE_HEAD_FORWARD_NAME,
+            SOURCE_HEAD_RIGHT_NAME,
+        ),
+        predicate=_is_face_helper_object,
+    )
+    refreshed += _backup_matching_datablocks(
+        bpy.data.materials,
+        _face_refresh_material_names(settings),
+    )
+    refreshed += _backup_matching_datablocks(
+        bpy.data.node_groups,
+        _face_refresh_node_group_names(settings),
+    )
+
+    for obj in objects:
+        _remove_face_generated_modifiers(obj)
+        _remove_face_outline_modifiers(obj)
+        _remove_solidify_outline_modifiers(obj)
+
+    return refreshed
 
 
 def _iter_face_integrated_eye_entries(settings, source_material_map):
@@ -3164,6 +4573,44 @@ def _find_main_shader_node(material):
     return None
 
 
+def _set_main_shader_input_default(material, socket_name: str, value):
+    shader_node = _find_main_shader_node(material)
+    if shader_node is None:
+        return False
+    socket = shader_node.inputs.get(socket_name)
+    if socket is None or not hasattr(socket, "default_value"):
+        return False
+    try:
+        socket.default_value = value
+        return True
+    except Exception:
+        return False
+
+
+def _apply_material_quality_correction(material, shader_type: str, role_presence: dict):
+    if material is None or shader_type != "CLOTH":
+        return
+
+    shader_node = _find_main_shader_node(material)
+    if shader_node is None:
+        return
+
+    if role_presence.get("tex_n"):
+        socket = shader_node.inputs.get("NormalStrength")
+        if socket is not None and hasattr(socket, "default_value"):
+            try:
+                socket.default_value = max(float(socket.default_value), 1.35)
+            except Exception:
+                pass
+
+    if role_presence.get("tex_p"):
+        socket = shader_node.inputs.get("CastShadow_sharp")
+        if socket is not None and hasattr(socket, "default_value"):
+            try:
+                socket.default_value = max(float(socket.default_value), 0.22)
+            except Exception:
+                pass
+
 def _find_face_sdf_image_nodes(node_tree):
     if not node_tree:
         return []
@@ -3174,7 +4621,18 @@ def _find_face_sdf_image_nodes(node_tree):
         image = getattr(node, "image", None)
         image_name = image.name.lower() if image else ""
         node_name = f"{node.name} {node.label}".lower()
-        if "common_female_face_01_sdf" in image_name or "face_01_sdf" in image_name or "sdf" in node_name:
+        output_names = " ".join(getattr(link.to_node, "name", "").lower() for output in node.outputs for link in output.links)
+        input_names = " ".join(getattr(link.from_node, "name", "").lower() for socket in node.inputs for link in socket.links)
+        if (
+            "common_female_face_01_sdf" in image_name
+            or "common_female_face_02_sdf" in image_name
+            or "face_01_sdf" in image_name
+            or "face_02_sdf" in image_name
+            or "sdf" in node_name
+            or "分离 xyz.001" in output_names
+            or "separate xyz.001" in output_names
+            or "endfield_face_sdf_mapping" in input_names
+        ):
             results.append(node)
     return results
 
@@ -3189,9 +4647,43 @@ def _find_face_cm_image_nodes(node_tree):
         image = getattr(node, "image", None)
         image_name = image.name.lower() if image else ""
         node_name = f"{node.name} {node.label}".lower()
-        if "common_female_face_01_cm_m" in image_name or "cm_m" in node_name:
+        output_names = " ".join(getattr(link.to_node, "name", "").lower() for output in node.outputs for link in output.links)
+        input_names = " ".join(getattr(link.from_node, "name", "").lower() for socket in node.inputs for link in socket.links)
+        if (
+            "common_female_face_01_cm_m" in image_name
+            or "cm_m" in node_name
+            or "转接点.111" in output_names
+            or "转接点.112" in output_names
+            or "endfield_face_cm_mapping" in input_names
+        ):
             results.append(node)
     return results
+
+
+def _restore_face_template_images(target_tree, source_tree):
+    if target_tree is None or source_tree is None:
+        return
+
+    source_nodes = {
+        node.name: node
+        for node in source_tree.nodes
+        if getattr(node, "type", "") == "TEX_IMAGE" and getattr(node, "image", None) is not None
+    }
+    if not source_nodes:
+        return
+
+    for target_node in target_tree.nodes:
+        if getattr(target_node, "type", "") != "TEX_IMAGE":
+            continue
+        source_node = source_nodes.get(target_node.name)
+        if source_node is None:
+            continue
+        source_image = getattr(source_node, "image", None)
+        if source_image is None:
+            continue
+        target_image = getattr(target_node, "image", None)
+        if target_image is None or not _image_is_usable(target_image):
+            target_node.image = source_image
 
 
 def _ensure_local_face_shader_group(material):
@@ -3199,13 +4691,17 @@ def _ensure_local_face_shader_group(material):
     if shader_node is None or not shader_node.node_tree:
         return None
     if _detect_shader_type_from_material(material) != "FACE":
+        _patch_node_tree_for_eevee_compat(shader_node.node_tree)
         return shader_node.node_tree
     node_tree = shader_node.node_tree
     if node_tree.get("_endfield_face_group_local"):
+        _patch_node_tree_for_eevee_compat(node_tree)
         return node_tree
     localized = node_tree.copy()
     localized["_endfield_face_group_local"] = True
     localized["_endfield_face_group_source"] = node_tree.name
+    _restore_face_template_images(localized, node_tree)
+    _patch_node_tree_for_eevee_compat(localized)
     shader_node.node_tree = localized
     return localized
 
@@ -3348,6 +4844,909 @@ def _adjust_face_mapping(material, target: str, socket_name: str, index: int, de
     values[index] += delta
     socket.default_value = values
     return mapping_node
+
+
+def _first_usable_image(nodes):
+    for node in nodes:
+        image = getattr(node, "image", None)
+        if image is not None:
+            return image
+    return None
+
+
+def _face_base_image(material):
+    image = _first_usable_image(_find_nodes_for_role(material, "tex_d"))
+    if image is not None:
+        return image
+    shader_node = _find_main_shader_node(material)
+    if shader_node is None or not shader_node.node_tree:
+        return None
+    return _first_usable_image(_iter_tex_image_nodes(material))
+
+
+def _face_uv_overlay_images(material):
+    shader_node = _find_main_shader_node(material)
+    if shader_node is None or not shader_node.node_tree:
+        return (None, None, None)
+    node_tree = shader_node.node_tree
+    return (
+        _face_base_image(material),
+        _first_usable_image(_find_face_sdf_image_nodes(node_tree)),
+        _first_usable_image(_find_face_cm_image_nodes(node_tree)),
+    )
+
+
+def _ensure_face_uv_preview_image(source_image, preview_name: str, tint, alpha: float):
+    if source_image is None:
+        return None
+    width = max(int(source_image.size[0]), 1)
+    height = max(int(source_image.size[1]), 1)
+    preview = bpy.data.images.get(preview_name)
+    if preview is None or tuple(preview.size[:]) != (width, height):
+        if preview is not None:
+            try:
+                bpy.data.images.remove(preview)
+            except Exception:
+                pass
+        preview = bpy.data.images.new(preview_name, width, height, alpha=True)
+        preview.alpha_mode = "STRAIGHT"
+    try:
+        pixels = list(source_image.pixels[:])
+    except Exception:
+        return preview
+    result = [0.0] * len(pixels)
+    for index in range(0, len(pixels), 4):
+        strength = max(pixels[index], pixels[index + 1], pixels[index + 2])
+        strength = max(strength, 0.12)
+        result[index] = tint[0] * strength
+        result[index + 1] = tint[1] * strength
+        result[index + 2] = tint[2] * strength
+        result[index + 3] = alpha * max(0.25, strength)
+    preview.pixels.foreach_set(result)
+    preview.update()
+    return preview
+
+
+def _safe_mapping_scale(value: float) -> float:
+    value = float(value)
+    if abs(value) < 1.0e-6:
+        return 1.0e-6 if value >= 0.0 else -1.0e-6
+    return value
+
+
+def _face_uv_rect_from_mapping(mapping_node):
+    if mapping_node is None:
+        return None
+    location = mapping_node.inputs["Location"].default_value
+    scale = mapping_node.inputs["Scale"].default_value
+    scale_x = _safe_mapping_scale(scale[0])
+    scale_y = _safe_mapping_scale(scale[1])
+    u0 = -float(location[0]) / scale_x
+    u1 = (1.0 - float(location[0])) / scale_x
+    v0 = -float(location[1]) / scale_y
+    v1 = (1.0 - float(location[1])) / scale_y
+    return (u0, v0, u1, v1)
+
+
+def _set_face_uv_mapping_from_rect(mapping_node, rect):
+    if mapping_node is None or rect is None:
+        return
+    u0, v0, u1, v1 = rect
+    width = u1 - u0
+    height = v1 - v0
+    if abs(width) < 1.0e-6 or abs(height) < 1.0e-6:
+        return
+    scale_x = 1.0 / width
+    scale_y = 1.0 / height
+    location = list(mapping_node.inputs["Location"].default_value)
+    scale = list(mapping_node.inputs["Scale"].default_value)
+    scale[0] = scale_x
+    scale[1] = scale_y
+    location[0] = -u0 * scale_x
+    location[1] = -v0 * scale_y
+    mapping_node.inputs["Scale"].default_value = scale
+    mapping_node.inputs["Location"].default_value = location
+
+
+def _ensure_face_uv_shader():
+    global FACE_UV_SHADER
+    if FACE_UV_SHADER is not None:
+        return FACE_UV_SHADER
+    vertex_source = """
+uniform mat4 ModelViewProjectionMatrix;
+in vec2 pos;
+in vec2 texCoord;
+out vec2 uvInterp;
+void main()
+{
+    uvInterp = texCoord;
+    gl_Position = ModelViewProjectionMatrix * vec4(pos.xy, 0.0, 1.0);
+}
+"""
+    fragment_source = """
+uniform sampler2D image;
+uniform float alpha;
+uniform vec3 tint;
+in vec2 uvInterp;
+out vec4 fragColor;
+void main()
+{
+    vec4 color = texture(image, uvInterp);
+    float strength = max(max(color.r, color.g), color.b);
+    strength = max(strength, 0.18);
+    fragColor = vec4(tint.rgb * strength, alpha);
+}
+"""
+    FACE_UV_SHADER = gpu.types.GPUShader(vertex_source, fragment_source)
+    return FACE_UV_SHADER
+
+
+def _face_uv_texture(image):
+    if image is None:
+        return None
+    key = image.name_full
+    cached = FACE_UV_TEXTURE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        texture = gpu.texture.from_image(image)
+    except Exception:
+        return None
+    FACE_UV_TEXTURE_CACHE[key] = texture
+    return texture
+
+
+def _clear_face_uv_texture_cache():
+    FACE_UV_TEXTURE_CACHE.clear()
+
+
+def _face_uv_state_material():
+    name = FACE_UV_CALIBRATION_STATE.get("material_name", "")
+    return bpy.data.materials.get(name) if name else None
+
+
+def _face_uv_state_object():
+    name = FACE_UV_CALIBRATION_STATE.get("object_name", "")
+    return bpy.data.objects.get(name) if name else None
+
+
+def _face_uv_state_image(key: str):
+    name = FACE_UV_CALIBRATION_STATE.get(key, "")
+    return bpy.data.images.get(name) if name else None
+
+
+def _iter_image_editor_areas():
+    window_manager = getattr(bpy.context, "window_manager", None)
+    if window_manager is None:
+        return
+    for window in window_manager.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type == "IMAGE_EDITOR":
+                yield window, area
+
+
+def _assign_image_to_image_editors(image):
+    if image is None:
+        return
+    for _window, area in _iter_image_editor_areas():
+        for space in area.spaces:
+            if space.type == "IMAGE_EDITOR":
+                space.image = image
+
+
+def _snapshot_image_editor_images():
+    snapshots = []
+    for window, area in _iter_image_editor_areas():
+        for space in area.spaces:
+            if space.type != "IMAGE_EDITOR":
+                continue
+            image = getattr(space, "image", None)
+            snapshots.append(
+                {
+                    "window_ptr": window.as_pointer(),
+                    "area_ptr": area.as_pointer(),
+                    "image_name": image.name if image is not None else "",
+                }
+            )
+            break
+    return snapshots
+
+
+def _restore_image_editor_images(snapshots):
+    if not snapshots:
+        return
+    snapshot_map = {
+        (item.get("window_ptr"), item.get("area_ptr")): item.get("image_name", "")
+        for item in snapshots
+    }
+    for window, area in _iter_image_editor_areas():
+        image_name = snapshot_map.get((window.as_pointer(), area.as_pointer()))
+        if image_name is None:
+            continue
+        image = bpy.data.images.get(image_name) if image_name else None
+        for space in area.spaces:
+            if space.type == "IMAGE_EDITOR":
+                space.image = image
+                break
+
+
+def _fit_image_editors_view():
+    for window, area in _iter_image_editor_areas():
+        region = next((region for region in area.regions if region.type == "WINDOW"), None)
+        space = next((space for space in area.spaces if space.type == "IMAGE_EDITOR"), None)
+        if region is None or space is None:
+            continue
+        override = {
+            "window": window,
+            "screen": window.screen,
+            "area": area,
+            "region": region,
+            "space_data": space,
+        }
+        try:
+            with bpy.context.temp_override(**override):
+                bpy.ops.image.view_all(fit_view=True)
+        except Exception:
+            continue
+
+
+def _face_uv_session_from_context(context):
+    obj = context.object
+    material = obj.active_material if obj else None
+    if obj is None or material is None or _detect_shader_type_from_material(material) != "FACE":
+        return None
+    _ensure_face_sdf_mapping_controls(material)
+    _ensure_face_cm_mapping_controls(material)
+    base_image, sdf_image, cm_image = _face_uv_overlay_images(material)
+    if base_image is None:
+        return None
+    return {
+        "object": obj,
+        "material": material,
+        "base_image": base_image,
+        "sdf_image": sdf_image,
+        "cm_image": cm_image,
+    }
+
+
+def _start_face_uv_calibration_session(context):
+    session = _face_uv_session_from_context(context)
+    if session is None:
+        return None
+
+    if FACE_UV_CALIBRATION_STATE.get("running"):
+        _stop_face_uv_calibration_session()
+
+    _clear_face_uv_texture_cache()
+    FACE_UV_CALIBRATION_STATE["editor_images"] = _snapshot_image_editor_images()
+    sdf_preview = _ensure_face_uv_preview_image(session["sdf_image"], "ENDFIELD_FACE_SDF_PREVIEW", (0.18, 0.85, 1.0), 0.38) if session["sdf_image"] is not None else None
+    cm_preview = _ensure_face_uv_preview_image(session["cm_image"], "ENDFIELD_FACE_CM_PREVIEW", (1.0, 0.72, 0.18), 0.32) if session["cm_image"] is not None else None
+    FACE_UV_CALIBRATION_STATE["running"] = True
+    FACE_UV_CALIBRATION_STATE["material_name"] = session["material"].name
+    FACE_UV_CALIBRATION_STATE["object_name"] = session["object"].name
+    FACE_UV_CALIBRATION_STATE["base_image_name"] = session["base_image"].name
+    FACE_UV_CALIBRATION_STATE["sdf_image_name"] = session["sdf_image"].name if session["sdf_image"] is not None else ""
+    FACE_UV_CALIBRATION_STATE["cm_image_name"] = session["cm_image"].name if session["cm_image"] is not None else ""
+    FACE_UV_CALIBRATION_STATE["sdf_preview_image_name"] = sdf_preview.name if sdf_preview is not None else ""
+    FACE_UV_CALIBRATION_STATE["cm_preview_image_name"] = cm_preview.name if cm_preview is not None else ""
+    FACE_UV_CALIBRATION_STATE["dragging"] = False
+    FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+    FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+    _assign_image_to_image_editors(session["base_image"])
+    _fit_image_editors_view()
+
+    if FACE_UV_CALIBRATION_STATE.get("draw_handle") is None:
+        FACE_UV_CALIBRATION_STATE["draw_handle"] = bpy.types.SpaceImageEditor.draw_handler_add(
+            _draw_face_uv_calibration_overlay,
+            (),
+            "WINDOW",
+            "POST_PIXEL",
+        )
+    _tag_all_areas_for_redraw()
+    return session
+
+
+def _stop_face_uv_calibration_session():
+    _restore_image_editor_images(FACE_UV_CALIBRATION_STATE.get("editor_images") or [])
+    handle = FACE_UV_CALIBRATION_STATE.get("draw_handle")
+    if handle is not None:
+        try:
+            bpy.types.SpaceImageEditor.draw_handler_remove(handle, "WINDOW")
+        except Exception:
+            pass
+    FACE_UV_CALIBRATION_STATE["draw_handle"] = None
+    FACE_UV_CALIBRATION_STATE["running"] = False
+    FACE_UV_CALIBRATION_STATE["dragging"] = False
+    FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+    FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+    FACE_UV_CALIBRATION_STATE["drag_start_uv"] = (0.0, 0.0)
+    FACE_UV_CALIBRATION_STATE["drag_rect"] = (0.0, 0.0, 1.0, 1.0)
+    FACE_UV_CALIBRATION_STATE["editor_images"] = []
+    _clear_face_uv_texture_cache()
+    for key in ("sdf_preview_image_name", "cm_preview_image_name"):
+        preview = _face_uv_state_image(key)
+        if preview is not None:
+            try:
+                bpy.data.images.remove(preview)
+            except Exception:
+                pass
+        FACE_UV_CALIBRATION_STATE[key] = ""
+    for key in ("material_name", "object_name", "base_image_name", "sdf_image_name", "cm_image_name"):
+        FACE_UV_CALIBRATION_STATE[key] = ""
+    _tag_all_areas_for_redraw()
+
+
+def _face_uv_region_from_context(context):
+    if context.region and context.region.type == "WINDOW":
+        return context.region
+    if context.area is None:
+        return None
+    for region in context.area.regions:
+        if region.type == "WINDOW":
+            return region
+    return None
+
+
+def _face_uv_event_to_uv(context, event, base_image):
+    region = _face_uv_region_from_context(context)
+    if region is None or base_image is None:
+        return None
+    view_x, view_y = region.view2d.region_to_view(event.mouse_region_x, event.mouse_region_y)
+    return (view_x, view_y)
+
+
+def _face_uv_rect_contains(rect, uv):
+    if rect is None or uv is None:
+        return False
+    u0, v0, u1, v1 = rect
+    u_min, u_max = sorted((u0, u1))
+    v_min, v_max = sorted((v0, v1))
+    return u_min <= uv[0] <= u_max and v_min <= uv[1] <= v_max
+
+
+def _face_uv_current_rects(material):
+    return {
+        "SDF": _face_uv_rect_from_mapping(_face_sdf_mapping_node(material)),
+        "CM": _face_uv_rect_from_mapping(_face_cm_mapping_node(material)),
+    }
+
+
+def _pick_face_uv_target(settings, material, uv):
+    rects = _face_uv_current_rects(material)
+    visible = []
+    if settings.face_uv_show_sdf and rects["SDF"] is not None:
+        visible.append("SDF")
+    if settings.face_uv_show_cm and rects["CM"] is not None:
+        visible.append("CM")
+    if not visible:
+        return None
+    preferred = settings.face_uv_active_target
+    order = [preferred] + [item for item in visible if item != preferred]
+    for target in order:
+        rect = rects.get(target)
+        if _face_uv_rect_contains(rect, uv):
+            return target
+    return preferred if preferred in visible else visible[0]
+
+
+def _apply_face_uv_drag(material, target: str, mode: str, start_rect, start_uv, current_uv):
+    mapping_node = _ensure_face_mapping_node(material, target)
+    if mapping_node is None:
+        return
+    if start_rect is None or start_uv is None or current_uv is None:
+        return
+
+    u0, v0, u1, v1 = start_rect
+    du = current_uv[0] - start_uv[0]
+    dv = current_uv[1] - start_uv[1]
+
+    if mode == "SCALE":
+        center_u = (u0 + u1) * 0.5
+        center_v = (v0 + v1) * 0.5
+        half_w = max(abs(u1 - u0) * 0.5 + du, 1.0e-4)
+        half_h = max(abs(v1 - v0) * 0.5 + dv, 1.0e-4)
+        rect = (center_u - half_w, center_v - half_h, center_u + half_w, center_v + half_h)
+    else:
+        rect = (u0 + du, v0 + dv, u1 + du, v1 + dv)
+
+    _set_face_uv_mapping_from_rect(mapping_node, rect)
+    _tag_all_areas_for_redraw()
+
+
+def _draw_face_uv_textured_rect(region, base_image, overlay_image, rect):
+    if region is None or base_image is None or overlay_image is None or rect is None:
+        return
+    u0, v0, u1, v1 = rect
+    texture = _face_uv_texture(overlay_image)
+    if texture is None:
+        return
+    lower_left = region.view2d.view_to_region(u0, v0, clip=False)
+    upper_right = region.view2d.view_to_region(u1, v1, clip=False)
+    draw_width = upper_right[0] - lower_left[0]
+    draw_height = upper_right[1] - lower_left[1]
+    if abs(draw_width) < 1.0 or abs(draw_height) < 1.0:
+        return
+    gpu.state.blend_set("ALPHA")
+    draw_texture_2d(texture, lower_left, draw_width, draw_height)
+
+
+def _draw_face_uv_outline(region, base_image, rect, color):
+    if region is None or base_image is None or rect is None:
+        return
+    u0, v0, u1, v1 = rect
+    points = [
+        region.view2d.view_to_region(u0, v0, clip=False),
+        region.view2d.view_to_region(u1, v0, clip=False),
+        region.view2d.view_to_region(u1, v1, clip=False),
+        region.view2d.view_to_region(u0, v1, clip=False),
+    ]
+    shader = gpu.shader.from_builtin("UNIFORM_COLOR")
+    batch = batch_for_shader(shader, "LINE_LOOP", {"pos": points})
+    gpu.state.blend_set("ALPHA")
+    gpu.state.line_width_set(2.0)
+    shader.bind()
+    shader.uniform_float("color", color)
+    batch.draw(shader)
+    gpu.state.line_width_set(1.0)
+
+
+def _draw_face_uv_calibration_overlay():
+    if not FACE_UV_CALIBRATION_STATE.get("running"):
+        return
+    context = bpy.context
+    region = context.region
+    if region is None or region.type != "WINDOW":
+        return
+
+    material = _face_uv_state_material()
+    base_image = _face_uv_state_image("base_image_name")
+    if material is None or base_image is None:
+        return
+
+    settings = context.scene.endfield_toon_settings
+    rects = _face_uv_current_rects(material)
+    if settings.face_uv_show_sdf:
+        _draw_face_uv_textured_rect(region, base_image, _face_uv_state_image("sdf_preview_image_name"), rects["SDF"])
+        _draw_face_uv_outline(region, base_image, rects["SDF"], (0.5, 0.9, 1.0, 0.95) if settings.face_uv_active_target == "SDF" else (0.5, 0.9, 1.0, 0.55))
+    if settings.face_uv_show_cm:
+        _draw_face_uv_textured_rect(region, base_image, _face_uv_state_image("cm_preview_image_name"), rects["CM"])
+        _draw_face_uv_outline(region, base_image, rects["CM"], (1.0, 0.8, 0.35, 0.95) if settings.face_uv_active_target == "CM" else (1.0, 0.8, 0.35, 0.55))
+
+def _sanitize_name_fragment(text: str, max_len: int = 36) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z_]+", "_", text or "")
+    cleaned = cleaned.strip("_")
+    if not cleaned:
+        cleaned = "Item"
+    return cleaned[:max_len]
+
+
+def _ensure_face_tex_control_collection():
+    scene_root = bpy.context.scene.collection
+    collection = bpy.data.collections.get(FACE_TEX_CONTROL_COLLECTION_NAME)
+    if collection is None:
+        collection = bpy.data.collections.new(FACE_TEX_CONTROL_COLLECTION_NAME)
+    if collection.name not in {child.name for child in scene_root.children}:
+        scene_root.children.link(collection)
+    return collection
+
+
+def _material_face_tex_control_name(material, suffix: str) -> str:
+    fragment = _sanitize_name_fragment(material.name, max_len=28)
+    return f"ENDFIELD_{fragment}_{suffix}"
+
+
+def _material_face_tex_control_object(material, prop_key: str, fallback_suffix: str = ""):
+    if material is None:
+        return None
+    name = material.get(prop_key, "")
+    obj = bpy.data.objects.get(name) if name else None
+    if obj is not None:
+        return obj
+    if fallback_suffix:
+        return bpy.data.objects.get(_material_face_tex_control_name(material, fallback_suffix))
+    return None
+
+
+def _world_bbox_points(obj):
+    if obj is None or getattr(obj, "type", "") != "MESH":
+        location = obj.matrix_world.translation.copy() if obj is not None else Vector((0.0, 0.0, 0.0))
+        return [location]
+    return [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+
+
+def _projected_span(points, center: Vector, axis: Vector) -> float:
+    if not points:
+        return 0.0
+    values = [(point - center).dot(axis) for point in points]
+    return max(values) - min(values)
+
+
+def _safe_normalized(vector: Vector, fallback: Vector) -> Vector:
+    if vector.length <= 1.0e-8:
+        return fallback.normalized()
+    return vector.normalized()
+
+
+def _face_control_basis(obj):
+    points = _world_bbox_points(obj)
+    center = sum(points, Vector((0.0, 0.0, 0.0))) / max(len(points), 1)
+
+    helper_rig = _current_head_helper_rig()
+    if helper_rig is not None:
+        hc = helper_rig["HC"].matrix_world.translation
+        hf = helper_rig["HF"].matrix_world.translation
+        hr = helper_rig["HR"].matrix_world.translation
+        x_axis = _safe_normalized(hr - hc, Vector((1.0, 0.0, 0.0)))
+        forward = _safe_normalized(hf - hc, Vector((0.0, -1.0, 0.0)))
+        z_axis = _safe_normalized(x_axis.cross(forward), Vector((0.0, 0.0, 1.0)))
+        forward = _safe_normalized(z_axis.cross(x_axis), forward)
+    else:
+        basis = obj.matrix_world.to_3x3()
+        x_axis = _safe_normalized(basis @ Vector((1.0, 0.0, 0.0)), Vector((1.0, 0.0, 0.0)))
+        z_axis = _safe_normalized(basis @ Vector((0.0, 0.0, 1.0)), Vector((0.0, 0.0, 1.0)))
+        forward = _safe_normalized(-(basis @ Vector((0.0, 1.0, 0.0))), Vector((0.0, -1.0, 0.0)))
+
+    depth_span = max(_projected_span(points, center, forward), 0.02)
+    origin = center + forward * max(depth_span * 0.6, 0.02)
+    span_x = max(_projected_span(points, center, x_axis), 0.02)
+    span_z = max(_projected_span(points, center, z_axis), 0.02)
+    basis_matrix = Matrix((x_axis, forward, z_axis)).transposed().to_4x4()
+    return origin, basis_matrix, span_x, span_z
+
+
+def _configure_face_tex_control_object(obj, display_size: float):
+    if obj is None:
+        return
+    if obj.type == "EMPTY":
+        obj.empty_display_type = "CUBE"
+        obj.empty_display_size = display_size
+    elif obj.type == "MESH":
+        if hasattr(obj, "display_type"):
+            obj.display_type = "TEXTURED"
+    obj.hide_viewport = False
+    obj.show_name = True
+    if hasattr(obj, "show_in_front"):
+        obj.show_in_front = True
+    obj.hide_render = True
+    obj.lock_location[1] = True
+    obj.lock_rotation[0] = True
+    obj.lock_rotation[1] = True
+    obj.lock_rotation[2] = True
+    obj.lock_scale[1] = True
+
+
+def _ensure_face_preview_material(name: str, image, tint=(1.0, 1.0, 1.0, 1.0), alpha_factor: float = 0.55):
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    nodes.clear()
+
+    tex = nodes.new("ShaderNodeTexImage")
+    tex.location = (-720.0, 120.0)
+    tex.image = image
+
+    tint_node = nodes.new("ShaderNodeMixRGB")
+    tint_node.location = (-480.0, 120.0)
+    tint_node.blend_type = "MULTIPLY"
+    tint_node.inputs["Fac"].default_value = 1.0
+    tint_node.inputs["Color2"].default_value = tint
+
+    emission = nodes.new("ShaderNodeEmission")
+    emission.location = (-200.0, 120.0)
+    emission.inputs["Strength"].default_value = 1.0
+
+    transparent = nodes.new("ShaderNodeBsdfTransparent")
+    transparent.location = (-200.0, -80.0)
+
+    alpha_math = nodes.new("ShaderNodeMath")
+    alpha_math.location = (-480.0, -80.0)
+    alpha_math.operation = "MULTIPLY"
+    alpha_math.inputs[1].default_value = alpha_factor
+
+    mix_shader = nodes.new("ShaderNodeMixShader")
+    mix_shader.location = (40.0, 60.0)
+
+    out = nodes.new("ShaderNodeOutputMaterial")
+    out.location = (260.0, 60.0)
+
+    links.new(tex.outputs["Color"], tint_node.inputs["Color1"])
+    links.new(tint_node.outputs["Color"], emission.inputs["Color"])
+    links.new(tex.outputs["Alpha"], alpha_math.inputs[0])
+    links.new(alpha_math.outputs["Value"], mix_shader.inputs["Fac"])
+    links.new(transparent.outputs["BSDF"], mix_shader.inputs[1])
+    links.new(emission.outputs["Emission"], mix_shader.inputs[2])
+    links.new(mix_shader.outputs["Shader"], out.inputs["Surface"])
+
+    _set_alpha_blend_mode(material)
+    if hasattr(material, "shadow_method"):
+        try:
+            material.shadow_method = "NONE"
+        except Exception:
+            pass
+    if hasattr(material, "use_backface_culling"):
+        material.use_backface_culling = False
+    return material
+
+
+def _create_face_preview_plane_mesh(mesh_name: str):
+    mesh = bpy.data.meshes.new(mesh_name)
+    mesh.from_pydata(
+        [
+            (-0.5, 0.0, -0.5),
+            (0.5, 0.0, -0.5),
+            (0.5, 0.0, 0.5),
+            (-0.5, 0.0, 0.5),
+        ],
+        [],
+        [(0, 1, 2, 3)],
+    )
+    mesh.update()
+    return mesh
+
+
+def _ensure_face_preview_plane_object(name: str, collection, image, label: str, tint=(1.0, 1.0, 1.0, 1.0)):
+    obj = bpy.data.objects.get(name)
+    if obj is None or obj.type != "MESH":
+        if obj is not None:
+            try:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception:
+                pass
+        mesh = _create_face_preview_plane_mesh(f"{name}_Mesh")
+        obj = bpy.data.objects.new(name, mesh)
+    elif obj.data is None:
+        obj.data = _create_face_preview_plane_mesh(f"{name}_Mesh")
+
+    _link_object_to_collection(obj, collection)
+    obj.name = name
+    obj.hide_render = True
+    obj.show_name = True
+    obj.name = name
+
+    material_name = f"{name}_PreviewMat"
+    material = _ensure_face_preview_material(material_name, image, tint=tint)
+    if len(obj.data.materials) == 0:
+        obj.data.materials.append(material)
+    else:
+        obj.data.materials[0] = material
+    for index in range(len(obj.data.materials) - 1, 0, -1):
+        obj.data.materials.pop(index=index)
+    obj["preview_label"] = label
+    return obj
+
+
+def _remove_control_object_with_data(obj):
+    if obj is None:
+        return
+    data = getattr(obj, "data", None)
+    materials = list(getattr(data, "materials", [])) if data is not None and hasattr(data, "materials") else []
+    bpy.data.objects.remove(obj, do_unlink=True)
+    if data is not None and getattr(data, "users", 0) == 0:
+        try:
+            bpy.data.meshes.remove(data)
+        except Exception:
+            pass
+    for material in materials:
+        if material is not None and material.users == 0:
+            try:
+                bpy.data.materials.remove(material)
+            except Exception:
+                pass
+
+
+def _clear_driver_variables(driver):
+    while driver.variables:
+        driver.variables.remove(driver.variables[0])
+
+
+def _add_transform_driver_var(driver, name: str, target_obj, transform_type: str):
+    variable = driver.variables.new()
+    variable.name = name
+    variable.type = "TRANSFORMS"
+    target = variable.targets[0]
+    target.id = target_obj
+    target.transform_type = transform_type
+    target.transform_space = "LOCAL_SPACE"
+    return variable
+
+
+def _add_single_prop_driver_var(driver, name: str, target_id, data_path: str):
+    variable = driver.variables.new()
+    variable.name = name
+    variable.type = "SINGLE_PROP"
+    target = variable.targets[0]
+    target.id = target_id
+    target.data_path = data_path
+    return variable
+
+
+def _configure_face_mapping_drivers(mapping_node, controller, span_x: float, span_z: float):
+    if mapping_node is None or controller is None:
+        return
+
+    location_socket = mapping_node.inputs.get("Location")
+    scale_socket = mapping_node.inputs.get("Scale")
+    if location_socket is None or scale_socket is None:
+        return
+
+    base_location = list(location_socket.default_value)
+    base_scale = list(scale_socket.default_value)
+    rest_location = controller.location.copy()
+    rest_scale = controller.scale.copy()
+
+    controller["base_loc_x"] = float(base_location[0])
+    controller["base_loc_y"] = float(base_location[1])
+    controller["base_scale_x"] = float(base_scale[0])
+    controller["base_scale_y"] = float(base_scale[1])
+    controller["rest_loc_x"] = float(rest_location.x)
+    controller["rest_loc_z"] = float(rest_location.z)
+    controller["rest_scale_x"] = float(rest_scale.x)
+    controller["rest_scale_z"] = float(rest_scale.z)
+    controller["span_x"] = float(max(span_x, 1.0e-6))
+    controller["span_z"] = float(max(span_z, 1.0e-6))
+
+    for socket, index, expression in (
+        (location_socket, 0, "base_loc_x - ((loc_x - rest_loc_x) / span_x)"),
+        (location_socket, 1, "base_loc_y - ((loc_z - rest_loc_z) / span_z)"),
+        (scale_socket, 0, "base_scale_x * rest_scale_x / scale_x"),
+        (scale_socket, 1, "base_scale_y * rest_scale_z / scale_z"),
+    ):
+        try:
+            fcurve = socket.driver_add("default_value", index)
+        except TypeError:
+            continue
+        driver = fcurve.driver
+        driver.type = "SCRIPTED"
+        _clear_driver_variables(driver)
+        _add_transform_driver_var(driver, "loc_x", controller, "LOC_X")
+        _add_transform_driver_var(driver, "loc_z", controller, "LOC_Z")
+        _add_transform_driver_var(driver, "scale_x", controller, "SCALE_X")
+        _add_transform_driver_var(driver, "scale_z", controller, "SCALE_Z")
+        _add_single_prop_driver_var(driver, "base_loc_x", controller, '["base_loc_x"]')
+        _add_single_prop_driver_var(driver, "base_loc_y", controller, '["base_loc_y"]')
+        _add_single_prop_driver_var(driver, "base_scale_x", controller, '["base_scale_x"]')
+        _add_single_prop_driver_var(driver, "base_scale_y", controller, '["base_scale_y"]')
+        _add_single_prop_driver_var(driver, "rest_loc_x", controller, '["rest_loc_x"]')
+        _add_single_prop_driver_var(driver, "rest_loc_z", controller, '["rest_loc_z"]')
+        _add_single_prop_driver_var(driver, "rest_scale_x", controller, '["rest_scale_x"]')
+        _add_single_prop_driver_var(driver, "rest_scale_z", controller, '["rest_scale_z"]')
+        _add_single_prop_driver_var(driver, "span_x", controller, '["span_x"]')
+        _add_single_prop_driver_var(driver, "span_z", controller, '["span_z"]')
+        driver.expression = expression
+
+
+def _remove_mapping_socket_drivers(socket):
+    if socket is None or not hasattr(socket, "default_value"):
+        return
+    value = list(socket.default_value)
+    for index in range(len(value)):
+        try:
+            socket.driver_remove("default_value", index)
+        except TypeError:
+            continue
+    socket.default_value = value
+
+
+def _apply_face_drag_mapping(material, remove_controls: bool = True):
+    if material is None:
+        return 0
+
+    baked = 0
+    for mapping_node in (_face_sdf_mapping_node(material), _face_cm_mapping_node(material)):
+        if mapping_node is None:
+            continue
+        location_socket = mapping_node.inputs.get("Location")
+        scale_socket = mapping_node.inputs.get("Scale")
+        if location_socket is not None:
+            _remove_mapping_socket_drivers(location_socket)
+            baked += 1
+        if scale_socket is not None:
+            _remove_mapping_socket_drivers(scale_socket)
+
+    if not remove_controls:
+        return baked
+
+    for key, fallback in (
+        (FACE_TEX_CONTROL_SDF_KEY, "SDF_CTRL"),
+        (FACE_TEX_CONTROL_CM_KEY, "CM_CTRL"),
+        (FACE_TEX_CONTROL_ROOT_KEY, "CTRL_ROOT"),
+    ):
+        obj = _material_face_tex_control_object(material, key, fallback_suffix=fallback)
+        if obj is not None:
+            _remove_control_object_with_data(obj)
+        if key in material:
+            del material[key]
+    return baked
+
+
+def _ensure_face_drag_controls(settings: ENDFIELD_PG_Settings, obj, material):
+    if obj is None or material is None:
+        return None
+
+    sdf_mapping = _ensure_face_sdf_mapping_controls(material)
+    cm_mapping = _ensure_face_cm_mapping_controls(material)
+    if sdf_mapping is None and cm_mapping is None:
+        return None
+
+    _apply_face_drag_mapping(material, remove_controls=True)
+
+    collection = _ensure_face_tex_control_collection()
+    root_name = _material_face_tex_control_name(material, "CTRL_ROOT")
+    sdf_name = _material_face_tex_control_name(material, "SDF_CTRL")
+    cm_name = _material_face_tex_control_name(material, "CM_CTRL")
+
+    root = _get_or_create_empty(root_name, collection)
+    sdf_image = next((getattr(node, "image", None) for node in _find_face_sdf_image_nodes(sdf_mapping.id_data) if getattr(node, "image", None) is not None), None) if sdf_mapping is not None else None
+    cm_image = next((getattr(node, "image", None) for node in _find_face_cm_image_nodes(cm_mapping.id_data) if getattr(node, "image", None) is not None), None) if cm_mapping is not None else None
+    sdf_ctrl = _ensure_face_preview_plane_object(sdf_name, collection, sdf_image, "SDF", tint=(0.82, 0.95, 1.0, 1.0)) if sdf_mapping is not None else _get_or_create_empty(sdf_name, collection)
+    cm_ctrl = _ensure_face_preview_plane_object(cm_name, collection, cm_image, "CM", tint=(1.0, 0.88, 0.72, 1.0)) if cm_mapping is not None else _get_or_create_empty(cm_name, collection)
+    _move_object_to_collection(root, collection, exclusive=True)
+    _move_object_to_collection(sdf_ctrl, collection, exclusive=True)
+    _move_object_to_collection(cm_ctrl, collection, exclusive=True)
+
+    origin, basis_matrix, span_x, span_z = _face_control_basis(obj)
+    display_size = max(span_x, span_z) * 0.25
+
+    _clear_parent_keep_transform(root)
+    _remove_child_of_constraints(root)
+    root.empty_display_type = "PLAIN_AXES"
+    root.empty_display_size = max(display_size * 0.25, 0.01)
+    root.show_name = False
+    root.hide_render = True
+    root.hide_viewport = False
+    root.matrix_world = Matrix.Translation(origin) @ basis_matrix
+
+    armature, head_bone = _resolve_head_bone(settings, obj)
+    if armature is not None and head_bone is not None:
+        root_world = root.matrix_world.copy()
+        _replace_child_of_constraint(root, "Child Of", armature, head_bone.name, desired_world=root_world)
+
+    _clear_parent_keep_transform(sdf_ctrl)
+    _clear_parent_keep_transform(cm_ctrl)
+    sdf_ctrl.parent = root
+    cm_ctrl.parent = root
+    sdf_ctrl.matrix_parent_inverse = root.matrix_world.inverted_safe()
+    cm_ctrl.matrix_parent_inverse = root.matrix_world.inverted_safe()
+
+    sdf_ctrl.location = Vector((-span_x * 0.35, 0.0, 0.0))
+    cm_ctrl.location = Vector((span_x * 0.35, 0.0, 0.0))
+    sdf_ctrl.rotation_euler = (0.0, 0.0, 0.0)
+    cm_ctrl.rotation_euler = (0.0, 0.0, 0.0)
+
+    if sdf_mapping is not None:
+        sdf_scale = sdf_mapping.inputs["Scale"].default_value
+        sdf_ctrl.scale = (
+            max(1.0 / max(abs(float(sdf_scale[0])), 1.0e-4), 0.1),
+            0.02,
+            max(1.0 / max(abs(float(sdf_scale[1])), 1.0e-4), 0.1),
+        )
+        _configure_face_tex_control_object(sdf_ctrl, display_size)
+        _configure_face_mapping_drivers(sdf_mapping, sdf_ctrl, span_x, span_z)
+    else:
+        sdf_ctrl.hide_viewport = True
+
+    if cm_mapping is not None:
+        cm_scale = cm_mapping.inputs["Scale"].default_value
+        cm_ctrl.scale = (
+            max(1.0 / max(abs(float(cm_scale[0])), 1.0e-4), 0.1),
+            0.02,
+            max(1.0 / max(abs(float(cm_scale[1])), 1.0e-4), 0.1),
+        )
+        _configure_face_tex_control_object(cm_ctrl, display_size)
+        _configure_face_mapping_drivers(cm_mapping, cm_ctrl, span_x, span_z)
+    else:
+        cm_ctrl.hide_viewport = True
+
+    material[FACE_TEX_CONTROL_ROOT_KEY] = root.name
+    material[FACE_TEX_CONTROL_SDF_KEY] = sdf_ctrl.name
+    material[FACE_TEX_CONTROL_CM_KEY] = cm_ctrl.name
+    return {"root": root, "sdf": sdf_ctrl if sdf_mapping is not None else None, "cm": cm_ctrl if cm_mapping is not None else None}
 
 
 def _selected_test_meshes(context):
@@ -3536,8 +5935,26 @@ def _cleanup_unused_source_assets(library_path: str):
 
 @persistent
 def _endfield_load_post(_dummy=None):
+    compat_required = _requires_eevee_compat()
     try:
         _ensure_eye_attribute_patch_node_group()
+        if compat_required:
+            _ensure_eevee_shader_info_compat_group()
+            _ensure_eevee_shader_info_lit_compat_group()
+            _ensure_eevee_screenspace_info_compat_group()
+    except Exception:
+        pass
+    try:
+        _bootstrap_texture_states()
+    except Exception:
+        pass
+    try:
+        generated_scene = _scene_has_generated_endfield_scene()
+        if compat_required and generated_scene and _scene_has_endfield_materials():
+            _patch_all_endfield_materials_for_eevee_compat()
+        settings = getattr(bpy.context.scene, "endfield_toon_settings", None)
+        if settings is not None and generated_scene:
+            _repair_current_endfield_scene(settings, ensure_environment=True)
     except Exception:
         pass
 
@@ -3870,6 +6287,199 @@ class ENDFIELD_OT_AdjustFaceMapping(Operator):
         return {"FINISHED"}
 
 
+class ENDFIELD_OT_EnableFaceDragControls(Operator):
+    bl_idname = "endfield_toon.enable_face_drag_controls"
+    bl_label = "启用拖拽校准"
+    bl_description = "Create viewport drag controls for the face SDF and highlight textures"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        material = obj.active_material if obj else None
+        return bool(obj and obj.type == "MESH" and _detect_shader_type_from_material(material) == "FACE")
+
+    def execute(self, context):
+        obj = context.object
+        material = obj.active_material if obj else None
+        controls = _ensure_face_drag_controls(context.scene.endfield_toon_settings, obj, material)
+        if controls is None:
+            self.report({"WARNING"}, "当前脸部材质没有可拖拽的 SDF / 亮斑贴图映射节点")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "已创建拖拽校准控制器：在正视图中移动/缩放控制器即可直观调整")
+        return {"FINISHED"}
+
+
+class ENDFIELD_OT_ApplyFaceDragControls(Operator):
+    bl_idname = "endfield_toon.apply_face_drag_controls"
+    bl_label = "应用并移除拖拽校准"
+    bl_description = "Bake the current drag result back into Mapping values and remove the temporary controls"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.object
+        material = obj.active_material if obj else None
+        return bool(obj and obj.type == "MESH" and _detect_shader_type_from_material(material) == "FACE")
+
+    def execute(self, context):
+        material = context.object.active_material if context.object else None
+        baked = _apply_face_drag_mapping(material, remove_controls=True)
+        if not baked:
+            self.report({"WARNING"}, "当前脸部材质没有正在使用的拖拽校准")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "已将拖拽结果写回贴图映射，并移除控制器")
+        return {"FINISHED"}
+
+
+class ENDFIELD_OT_StartFaceUVCalibration(Operator):
+    bl_idname = "endfield_toon.start_face_uv_calibration"
+    bl_label = "开始 UV 校准"
+    bl_description = "Show the face _D + SDF + M overlay calibration tool in the Image Editor"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(context.area and context.area.type == "IMAGE_EDITOR" and context.object and context.object.active_material and _detect_shader_type_from_material(context.object.active_material) == "FACE")
+
+    def invoke(self, context, event):
+        session = _start_face_uv_calibration_session(context)
+        if session is None:
+            self.report({"WARNING"}, "当前脸部材质缺少可用于 UV 校准的 _D 贴图或 Mapping 节点")
+            return {"CANCELLED"}
+        context.window_manager.modal_handler_add(self)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if not FACE_UV_CALIBRATION_STATE.get("running"):
+            return {"FINISHED"}
+        if context.area is None or context.area.type != "IMAGE_EDITOR":
+            return {"PASS_THROUGH"}
+
+        material = _face_uv_state_material()
+        base_image = _face_uv_state_image("base_image_name")
+        if material is None or base_image is None:
+            _stop_face_uv_calibration_session()
+            return {"CANCELLED"}
+
+        settings = context.scene.endfield_toon_settings
+
+        if event.value == "PRESS" and event.type in {"RET", "NUMPAD_ENTER", "SPACE"}:
+            FACE_UV_CALIBRATION_STATE["dragging"] = False
+            FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+            FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+            _stop_face_uv_calibration_session()
+            self.report({"INFO"}, "UV 校准已应用并退出")
+            return {"FINISHED"}
+
+        if event.type == "ESC" and event.value == "PRESS":
+            if FACE_UV_CALIBRATION_STATE.get("dragging"):
+                FACE_UV_CALIBRATION_STATE["dragging"] = False
+                FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+                FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+                return {"RUNNING_MODAL"}
+            _stop_face_uv_calibration_session()
+            return {"FINISHED"}
+
+        if event.type == "RIGHTMOUSE" and event.value == "PRESS":
+            if FACE_UV_CALIBRATION_STATE.get("dragging"):
+                FACE_UV_CALIBRATION_STATE["dragging"] = False
+                FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+                FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+                return {"RUNNING_MODAL"}
+            _stop_face_uv_calibration_session()
+            return {"FINISHED"}
+
+        if event.type == "LEFTMOUSE":
+            if event.value == "PRESS":
+                uv = _face_uv_event_to_uv(context, event, base_image)
+                target = _pick_face_uv_target(settings, material, uv)
+                if target is None:
+                    return {"PASS_THROUGH"}
+                FACE_UV_CALIBRATION_STATE["dragging"] = True
+                FACE_UV_CALIBRATION_STATE["drag_target"] = target
+                FACE_UV_CALIBRATION_STATE["drag_mode"] = "SCALE" if event.ctrl else "MOVE"
+                FACE_UV_CALIBRATION_STATE["drag_start_uv"] = uv
+                FACE_UV_CALIBRATION_STATE["drag_rect"] = _face_uv_current_rects(material).get(target) or (0.0, 0.0, 1.0, 1.0)
+                settings.face_uv_active_target = target
+                return {"RUNNING_MODAL"}
+            if event.value == "RELEASE" and FACE_UV_CALIBRATION_STATE.get("dragging"):
+                FACE_UV_CALIBRATION_STATE["dragging"] = False
+                FACE_UV_CALIBRATION_STATE["drag_target"] = ""
+                FACE_UV_CALIBRATION_STATE["drag_mode"] = ""
+                return {"RUNNING_MODAL"}
+
+        if event.type == "MOUSEMOVE" and FACE_UV_CALIBRATION_STATE.get("dragging"):
+            uv = _face_uv_event_to_uv(context, event, base_image)
+            _apply_face_uv_drag(
+                material,
+                FACE_UV_CALIBRATION_STATE.get("drag_target", settings.face_uv_active_target),
+                FACE_UV_CALIBRATION_STATE.get("drag_mode", "MOVE"),
+                FACE_UV_CALIBRATION_STATE.get("drag_rect"),
+                FACE_UV_CALIBRATION_STATE.get("drag_start_uv"),
+                uv,
+            )
+            return {"RUNNING_MODAL"}
+
+        return {"PASS_THROUGH"}
+
+
+class ENDFIELD_OT_StopFaceUVCalibration(Operator):
+    bl_idname = "endfield_toon.stop_face_uv_calibration"
+    bl_label = "停止 UV 校准"
+    bl_description = "Hide the UV/Image Editor overlay calibration tool"
+
+    def execute(self, context):
+        if not FACE_UV_CALIBRATION_STATE.get("running"):
+            self.report({"INFO"}, "当前没有正在运行的 UV 校准器")
+            return {"CANCELLED"}
+        _stop_face_uv_calibration_session()
+        self.report({"INFO"}, "已关闭 UV/Image Editor 贴图校准器")
+        return {"FINISHED"}
+
+
+class ENDFIELD_OT_FixEeveeCompat(Operator):
+    bl_idname = "endfield_toon.fix_eevee_compat"
+    bl_label = "Fix Eevee 5.x"
+    bl_description = "Replace broken Goo-only Shader Info placeholders with an Eevee-safe compatibility group"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        patched = _patch_all_endfield_materials_for_eevee_compat()
+        if patched:
+            self.report({"INFO"}, f"Patched {patched} Shader Info node(s) for Eevee 5.x compatibility.")
+        else:
+            self.report({"INFO"}, "No broken Shader Info placeholder nodes were found.")
+        return {"FINISHED"}
+
+
+class ENDFIELD_OT_SyncSceneEnvironment(Operator):
+    bl_idname = "endfield_toon.sync_scene_environment"
+    bl_label = "Sync Scene Settings"
+    bl_description = "Sync World, Goo/Eevee render settings, and the Endfield sun rig from the preset"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        settings = context.scene.endfield_toon_settings
+        library = _effective_library_path(settings)
+        if not library:
+            self.report({"WARNING"}, "No preset library found.")
+            return {"CANCELLED"}
+        repaired, removed_lights = _repair_current_endfield_scene(settings, ensure_environment=True)
+        extra_lights = [
+            obj.name for obj in bpy.data.objects
+            if obj.type == "LIGHT" and obj.name not in {SUN_LIGHT_NAME, SOURCE_SUN_LIGHT_NAME}
+        ]
+        message = "Scene environment and Goo/Eevee settings synced."
+        if repaired:
+            message += f" Repaired {repaired} legacy node-group links."
+        if removed_lights:
+            message += f" Removed default scene lights: {', '.join(removed_lights)}."
+        if extra_lights:
+            message += f" Extra scene lights detected: {', '.join(extra_lights[:3])}"
+        self.report({"INFO"}, message)
+        return {"FINISHED"}
+
+
 class ENDFIELD_OT_OneClickGenerate(Operator):
     bl_idname = "endfield_toon.one_click_generate"
     bl_label = "一键生成"
@@ -3905,6 +6515,7 @@ class ENDFIELD_OT_OneClickGenerate(Operator):
             self.report({"WARNING"}, face_validation_error)
             return {"CANCELLED"}
 
+        _force_clean_face_generation(settings, objects)
         _prime_preset_resources(settings)
 
         processed = 0
@@ -3915,8 +6526,10 @@ class ENDFIELD_OT_OneClickGenerate(Operator):
 
         if settings.migrate_source_environment:
             _migrate_scene_environment(settings, context.scene)
-        if settings.shader_type == "FACE" and (settings.create_helper_rig or settings.auto_geometry_nodes):
+        if settings.auto_geometry_nodes and settings.shader_type in {"FACE", "BODY", "CLOTH", "HAIR", "PUPIL"}:
             _ensure_sun_rig(settings)
+        _repair_legacy_scene_bindings(settings)
+        _remove_default_endfield_scene_lights()
 
         for obj in objects:
             if settings.clear_custom_normals:
@@ -3945,6 +6558,7 @@ class ENDFIELD_OT_OneClickGenerate(Operator):
                 fallback_warning = fallback_warning or template_material.name.startswith("ENDFIELD_")
                 new_material = template_material.copy()
                 new_material.name = f"{template_material.name}_{obj.name}_{slot_index}"
+                _patch_material_for_eevee_compat(new_material)
                 if settings.shader_type == "FACE" and settings.face_integrated_eye_transparency and material_shader_type in {"PUPIL", "BROW"}:
                     loaded_images, role_presence = _apply_source_material_images(new_material, source_material, material_shader_type)
                 else:
@@ -4088,6 +6702,12 @@ class ENDFIELD_PT_MainPanel(Panel):
         tex.label(text="贴图选择框（动态）")
         for slot in TEXTURE_SLOT_LAYOUT[settings.shader_type]:
             tex.prop(settings, slot.prop_id, text=slot.label)
+        if settings.shader_type == "FACE":
+            face_tex_box = tex.box()
+            face_tex_box.label(text="面部专用贴图")
+            face_tex_box.prop(settings, "face_sdf_tex", text="SDF 贴图")
+            face_tex_box.prop(settings, "face_cm_tex", text="M 亮斑贴图")
+            face_tex_box.label(text="留空时沿用预设中的默认 SDF / M", icon="INFO")
         tex.operator("endfield_toon.autofill_textures", icon="FILE_REFRESH")
 
         convert = layout.box()
@@ -4098,6 +6718,8 @@ class ENDFIELD_PT_MainPanel(Panel):
         convert.prop(settings, "clear_custom_normals")
         convert.prop(settings, "migrate_source_environment")
         convert.prop(settings, "auto_geometry_nodes")
+        convert.operator("endfield_toon.fix_eevee_compat", icon="SHADING_RENDERED", text="Fix Eevee 5.x")
+        convert.operator("endfield_toon.sync_scene_environment", icon="WORLD", text="Sync Scene Settings")
         if settings.shader_type == "FACE":
             convert.prop(settings, "create_helper_rig")
             head_box = convert.box()
@@ -4203,6 +6825,16 @@ class ENDFIELD_PT_MainPanel(Panel):
                     _draw_face_mapping_row(tweak, "CM", cm_mapping_node, "Location", 1, "亮斑 Y (±0.02)", 0.02)
                     _draw_face_mapping_row(tweak, "CM", cm_mapping_node, "Scale", 0, "亮斑 Scale X (±0.02)", 0.02)
                     _draw_face_mapping_row(tweak, "CM", cm_mapping_node, "Scale", 1, "亮斑 Scale Y (±0.02)", 0.02)
+                drag_box = tweak.box()
+                drag_box.label(text="拖拽式贴图校准")
+                drag_box.label(text="启用后会在脸前创建 SDF / 亮斑 控制器", icon="INFO")
+                drag_box.label(text="正视图中 G 移动 X/Z，S 缩放 X/Z 即可直观匹配", icon="INFO")
+                drag_box.operator("endfield_toon.enable_face_drag_controls", icon="EMPTY_AXIS")
+                drag_box.operator("endfield_toon.apply_face_drag_controls", icon="CHECKMARK")
+                uv_box = tweak.box()
+                uv_box.label(text="UV/Image Editor 叠层校准")
+                uv_box.label(text="请在 UV/Image Editor 中打开“脸部贴图校准”面板", icon="INFO")
+                uv_box.label(text="可单独开关 SDF / M，并直接在 _D 底图上拖动", icon="INFO")
         elif shader_type == "BROW":
             tweak.label(text="当前眉毛材质无需额外暴露调节项", icon="INFO")
         else:
@@ -4210,10 +6842,40 @@ class ENDFIELD_PT_MainPanel(Panel):
 
         credits = layout.box()
         credits.label(text="致谢", icon="HEART")
-        credits.label(text="感谢新杨XIYAG大佬制作的仿《明日方舟：终末地》渲染节点")
-        credits.label(text="感谢茶叶味香皂大佬配布的《明日方舟：终末地》陈千语")
+        for line in ACKNOWLEDGEMENT_LINES:
+            credits.label(text=line)
 
         layout.operator("endfield_toon.one_click_generate", icon="MATERIAL")
+
+
+class ENDFIELD_PT_ImageCalibrationPanel(Panel):
+    bl_label = "脸部贴图校准"
+    bl_idname = "ENDFIELD_PT_IMAGE_CALIBRATION_PANEL"
+    bl_space_type = "IMAGE_EDITOR"
+    bl_region_type = "UI"
+    bl_category = "终末地卡渲"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = context.scene.endfield_toon_settings
+        obj = context.object
+        material = obj.active_material if obj else None
+        shader_type = _detect_shader_type_from_material(material)
+
+        if shader_type != "FACE":
+            layout.label(text="请先在 3D 视图中选中脸部材质", icon="INFO")
+            return
+
+        box = layout.box()
+        box.label(text="UV/Image Editor 叠层校准")
+        box.label(text="背景会显示 _D，叠加显示 SDF / M", icon="IMAGE_DATA")
+        box.label(text="左键拖动: 平移  Ctrl+左键拖动: 缩放", icon="MOUSE_LMB")
+        box.prop(settings, "face_uv_show_sdf")
+        box.prop(settings, "face_uv_show_cm")
+        box.prop(settings, "face_uv_active_target")
+        row = box.row(align=True)
+        row.operator("endfield_toon.start_face_uv_calibration", icon="UV")
+        row.operator("endfield_toon.stop_face_uv_calibration", icon="PANEL_CLOSE")
 
 
 classes = (
@@ -4226,8 +6888,15 @@ classes = (
     ENDFIELD_OT_AddFaceEyeMaterialSlot,
     ENDFIELD_OT_RemoveFaceEyeMaterialSlot,
     ENDFIELD_OT_AdjustFaceMapping,
+    ENDFIELD_OT_EnableFaceDragControls,
+    ENDFIELD_OT_ApplyFaceDragControls,
+    ENDFIELD_OT_StartFaceUVCalibration,
+    ENDFIELD_OT_StopFaceUVCalibration,
+    ENDFIELD_OT_FixEeveeCompat,
+    ENDFIELD_OT_SyncSceneEnvironment,
     ENDFIELD_OT_OneClickGenerate,
     ENDFIELD_PT_MainPanel,
+    ENDFIELD_PT_ImageCalibrationPanel,
 )
 
 
@@ -4241,6 +6910,7 @@ def register():
 
 
 def unregister():
+    _stop_face_uv_calibration_session()
     if _endfield_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_endfield_load_post)
     if hasattr(bpy.types.Scene, "endfield_toon_settings"):
